@@ -1,0 +1,63 @@
+# Python / Backend
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+.venv/
+env/
+venv/
+ENV/
+backend/.venv/
+
+# Environment Variables
+.env
+.env.local
+.env.*.local
+backend/.env
+frontend/.env
+frontend/.env.local
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node / Frontend
+node_modules/
+.next/
+out/
+.turbo/
+build/
+dist/
+*.tsbuildinfo
+.npm/
+
+# IDE & OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/launch.json
+*.swp
+*.swo
+
+# Langfuse / Tracing local logs
+.langfuse/
