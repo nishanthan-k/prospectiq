@@ -4,8 +4,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     groq_api_key: str = ""
-    default_model: str = "llama-3.3-70b-versatile"
-    fast_model: str = "llama-3.1-8b-instant"
+    default_model: str = "openai/gpt-oss-120b"
+    fast_model: str = "openai/gpt-oss-20b"
     host: str = "0.0.0.0"
     port: int = 8000
 
