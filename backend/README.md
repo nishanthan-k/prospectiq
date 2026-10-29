@@ -54,6 +54,12 @@ uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 Alternatively, press `F5` in VS Code to start via the pre-configured **FastAPI: ProspectIQ** launch configuration.
 
+### 4. Run Tests
+
+```bash
+uv run pytest -v
+```
+
 ---
 
 ## API Endpoints
