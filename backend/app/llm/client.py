@@ -2,7 +2,7 @@ import time
 import uuid
 from typing import Optional, Union
 from groq import AsyncGroq
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.core.config import get_settings
 from app.core.logger import log
@@ -12,15 +12,48 @@ settings = get_settings()
 
 
 class LLMRequest(BaseModel):
-    """Unified LLM request payload with defaults."""
+    """Unified LLM request payload with defaults and field validations."""
 
-    prompt: str
-    system_prompt: Optional[str] = SALES_ASSISTANT_SYSTEM_PROMPT
-    model: str = Field(default_factory=lambda: settings.default_model)
-    temperature: float = 0.7
-    max_tokens: int = 1024
-    top_p: float = 1.0
-    request_id: Optional[str] = None
+    prompt: str = Field(..., min_length=1, description="Prompt text for the model")
+    system_prompt: Optional[str] = Field(
+        default=SALES_ASSISTANT_SYSTEM_PROMPT,
+        description="System prompt guiding assistant behavior",
+    )
+    model: str = Field(
+        default_factory=lambda: settings.default_model,
+        min_length=1,
+        description="Model identifier",
+    )
+    temperature: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="Sampling temperature (0.0 to 1.0)",
+    )
+    max_tokens: int = Field(
+        default=1024,
+        ge=1,
+        le=8192,
+        description="Maximum generation tokens (1 to 8192)",
+    )
+    top_p: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Nucleus sampling probability mass (0.0 to 1.0)",
+    )
+    request_id: Optional[str] = Field(
+        default=None,
+        max_length=64,
+        description="Optional correlation request ID",
+    )
+
+    @field_validator("prompt")
+    @classmethod
+    def validate_prompt_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Prompt cannot be empty or only whitespace")
+        return v.strip()
 
 
 class LLMResponse(BaseModel):
@@ -38,7 +71,7 @@ class LLMResponse(BaseModel):
 
 def get_groq_client() -> AsyncGroq:
     """Return an AsyncGroq client instance."""
-    return AsyncGroq(api_key=settings.groq_api_key or "gsk_placeholder")
+    return AsyncGroq(api_key=settings.groq_api_key)
 
 
 async def call_llm(

@@ -17,34 +17,13 @@ Built systematically across 8 production-grade milestones:
 
 ---
 
-## Quickstart
+## Monorepo Packages
 
-### 1. Environment Setup
-```bash
-# Create virtual environment
-uv venv .venv
-source .venv/bin/activate
+* [**backend/**](backend/README.md) – FastAPI service, Groq LLM integration, sales intelligence engine, and database persistence.
+* **frontend/** – Web dashboard for lead submission, evidence inspection, and outreach review *(planned for later levels)*.
 
-# Install dependencies in editable mode
-uv pip install -e ".[dev]"
-
-# Configure environment
-cp .env.example .env
-# Edit .env and paste your free Groq API key: GROQ_API_KEY=gsk_...
-```
-
-### 2. Run the Development Server
-```bash
-uv run uvicorn src.prospectiq.main:app --reload --port 8000
-```
-- API Docs: `http://localhost:8000/docs`
-- Health check: `http://localhost:8000/health`
-
-### 3. Run Automated Tests
-```bash
-uv run pytest -v
-```
+For backend setup, environment configuration, and API reference, see [backend/README.md](backend/README.md).
 
 ---
 
-For agent development rules, coding standards, and architectural constraints, see [CLAUDE.md](file:///Users/nishanthan/Projects/adk/prospectiq/CLAUDE.md).
+For agent development rules, coding standards, and architectural constraints, see [CLAUDE.md](CLAUDE.md).
