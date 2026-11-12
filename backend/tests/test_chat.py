@@ -20,7 +20,7 @@ async def test_chat_success(client: AsyncClient):
 
     with patch("app.main.call_llm", new=AsyncMock(return_value=mock_response)):
         response = await client.post(
-            "/chat",
+            "/api/chat",
             json={"prompt": "What does Stripe do?", "temperature": 0.5},
         )
 
@@ -36,7 +36,7 @@ async def test_chat_success(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_chat_blank_prompt_validation_error(client: AsyncClient):
-    response = await client.post("/chat", json={"prompt": "   "})
+    response = await client.post("/api/chat", json={"prompt": "   "})
     assert response.status_code == 422
     errors = response.json()["detail"]
     assert any("Prompt cannot be empty or only whitespace" in err["msg"] for err in errors)
@@ -44,7 +44,7 @@ async def test_chat_blank_prompt_validation_error(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_chat_temperature_out_of_bounds(client: AsyncClient):
-    response = await client.post("/chat", json={"prompt": "Hello", "temperature": 1.5})
+    response = await client.post("/api/chat", json={"prompt": "Hello", "temperature": 1.5})
     assert response.status_code == 422
     errors = response.json()["detail"]
     assert any("less than or equal to 1" in err["msg"] for err in errors)
@@ -52,7 +52,7 @@ async def test_chat_temperature_out_of_bounds(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_chat_max_tokens_out_of_bounds(client: AsyncClient):
-    response = await client.post("/chat", json={"prompt": "Hello", "max_tokens": 0})
+    response = await client.post("/api/chat", json={"prompt": "Hello", "max_tokens": 0})
     assert response.status_code == 422
     errors = response.json()["detail"]
     assert any("greater than or equal to 1" in err["msg"] for err in errors)
@@ -60,7 +60,7 @@ async def test_chat_max_tokens_out_of_bounds(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_chat_timeout_seconds_out_of_bounds(client: AsyncClient):
-    response = await client.post("/chat", json={"prompt": "Hello", "timeout_seconds": 0})
+    response = await client.post("/api/chat", json={"prompt": "Hello", "timeout_seconds": 0})
     assert response.status_code == 422
     errors = response.json()["detail"]
     assert any("greater than 0" in err["msg"] for err in errors)
@@ -73,7 +73,7 @@ async def test_chat_timeout_returns_504(client: AsyncClient):
         new=AsyncMock(side_effect=LLMTimeoutError("req_timeout_504", 5.0)),
     ):
         response = await client.post(
-            "/chat",
+            "/api/chat",
             json={"prompt": "Hello", "timeout_seconds": 5.0},
         )
 

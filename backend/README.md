@@ -79,7 +79,8 @@ Returns service status.
 
 ---
 
-### `POST /chat`
+
+### `POST /api/chat`
 
 Sends a prompt to the Groq LLM with sales intelligence system prompt and returns structured completion metrics.
 
