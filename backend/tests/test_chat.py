@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from httpx import AsyncClient
 
-from app.llm.client import LLMResponse
+from app.llm.client import LLMResponse, LLMTimeoutError
 
 
 @pytest.mark.asyncio
@@ -56,3 +56,27 @@ async def test_chat_max_tokens_out_of_bounds(client: AsyncClient):
     assert response.status_code == 422
     errors = response.json()["detail"]
     assert any("greater than or equal to 1" in err["msg"] for err in errors)
+
+
+@pytest.mark.asyncio
+async def test_chat_timeout_seconds_out_of_bounds(client: AsyncClient):
+    response = await client.post("/chat", json={"prompt": "Hello", "timeout_seconds": 0})
+    assert response.status_code == 422
+    errors = response.json()["detail"]
+    assert any("greater than 0" in err["msg"] for err in errors)
+
+
+@pytest.mark.asyncio
+async def test_chat_timeout_returns_504(client: AsyncClient):
+    with patch(
+        "app.main.call_llm",
+        new=AsyncMock(side_effect=LLMTimeoutError("req_timeout_504", 5.0)),
+    ):
+        response = await client.post(
+            "/chat",
+            json={"prompt": "Hello", "timeout_seconds": 5.0},
+        )
+
+    assert response.status_code == 504
+    assert "req_timeout_504" in response.json()["detail"]
+    assert "5.0s" in response.json()["detail"]

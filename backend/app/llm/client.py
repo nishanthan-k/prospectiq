@@ -1,7 +1,8 @@
+import asyncio
 import time
 import uuid
 from typing import Optional, Union
-from groq import AsyncGroq
+from groq import APITimeoutError, AsyncGroq
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.config import get_settings
@@ -47,6 +48,11 @@ class LLMRequest(BaseModel):
         max_length=64,
         description="Optional correlation request ID",
     )
+    timeout_seconds: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description="Optional per-request timeout in seconds (defaults to global setting)",
+    )
 
     @field_validator("prompt")
     @classmethod
@@ -69,9 +75,18 @@ class LLMResponse(BaseModel):
     latency_ms: float = 0.0
 
 
+class LLMTimeoutError(Exception):
+    """Raised when an LLM request exceeds its configured timeout."""
+
+    def __init__(self, request_id: str, timeout_seconds: float):
+        self.request_id = request_id
+        self.timeout_seconds = timeout_seconds
+        super().__init__(f"LLM request [{request_id}] timed out after {timeout_seconds}s")
+
+
 def get_groq_client() -> AsyncGroq:
     """Return an AsyncGroq client instance."""
-    return AsyncGroq(api_key=settings.groq_api_key)
+    return AsyncGroq(api_key=settings.groq_api_key, timeout=settings.llm_timeout_seconds)
 
 
 async def call_llm(
@@ -94,6 +109,9 @@ async def call_llm(
         req = request
 
     request_id = req.request_id or f"req_{uuid.uuid4().hex[:8]}"
+    timeout_seconds = (
+        req.timeout_seconds if req.timeout_seconds is not None else settings.llm_timeout_seconds
+    )
     groq_client = client or get_groq_client()
 
     messages = []
@@ -103,19 +121,31 @@ async def call_llm(
 
     log.info(
         f"[{request_id}] LLM call started: model={req.model}, "
-        f"temperature={req.temperature}, max_tokens={req.max_tokens}"
+        f"temperature={req.temperature}, max_tokens={req.max_tokens}, "
+        f"timeout={timeout_seconds}s"
     )
 
     start_time = time.perf_counter()
 
     try:
-        response = await groq_client.chat.completions.create(
-            model=req.model,
-            messages=messages,  # type: ignore
-            temperature=req.temperature,
-            max_tokens=req.max_tokens,
-            top_p=req.top_p,
+        response = await asyncio.wait_for(
+            groq_client.chat.completions.create(
+                model=req.model,
+                messages=messages,  # type: ignore
+                temperature=req.temperature,
+                max_tokens=req.max_tokens,
+                top_p=req.top_p,
+                timeout=timeout_seconds,
+            ),
+            timeout=timeout_seconds,
         )
+    except (APITimeoutError, TimeoutError) as exc:
+        latency_ms = (time.perf_counter() - start_time) * 1000.0
+        log.error(
+            f"[{request_id}] LLM call timed out after {latency_ms:.0f}ms "
+            f"(limit={timeout_seconds}s)"
+        )
+        raise LLMTimeoutError(request_id, timeout_seconds) from exc
     except Exception as exc:
         latency_ms = (time.perf_counter() - start_time) * 1000.0
         log.error(f"[{request_id}] LLM call failed after {latency_ms:.0f}ms: {exc}")

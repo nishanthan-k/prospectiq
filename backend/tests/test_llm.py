@@ -1,7 +1,11 @@
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
+import httpx
 import pytest
+from groq import APITimeoutError
 
-from app.llm.client import LLMRequest, call_llm
+from app.core.config import get_settings
+from app.llm.client import LLMRequest, LLMTimeoutError, call_llm
 
 
 def create_mock_completion(
@@ -78,3 +82,53 @@ async def test_call_llm_exception_reraised():
 
     with pytest.raises(RuntimeError, match="Groq network error"):
         await call_llm(LLMRequest(prompt="Will fail"), client=mock_client)
+
+
+@pytest.mark.asyncio
+async def test_call_llm_uses_global_timeout_by_default():
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create.return_value = create_mock_completion()
+
+    await call_llm(LLMRequest(prompt="Hello"), client=mock_client)
+
+    _, kwargs = mock_client.chat.completions.create.call_args
+    assert kwargs["timeout"] == get_settings().llm_timeout_seconds
+
+
+@pytest.mark.asyncio
+async def test_call_llm_uses_per_request_timeout_override():
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create.return_value = create_mock_completion()
+
+    await call_llm(LLMRequest(prompt="Hello", timeout_seconds=5.5), client=mock_client)
+
+    _, kwargs = mock_client.chat.completions.create.call_args
+    assert kwargs["timeout"] == 5.5
+
+
+@pytest.mark.asyncio
+async def test_call_llm_api_timeout_error_raises_llm_timeout_error():
+    mock_client = AsyncMock()
+    mock_request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    mock_client.chat.completions.create.side_effect = APITimeoutError(request=mock_request)
+
+    req = LLMRequest(prompt="Slow query", request_id="req_timeout_1", timeout_seconds=2.0)
+    with pytest.raises(LLMTimeoutError, match=r"req_timeout_1.*2\.0s") as exc_info:
+        await call_llm(req, client=mock_client)
+
+    assert exc_info.value.request_id == "req_timeout_1"
+    assert exc_info.value.timeout_seconds == 2.0
+
+
+@pytest.mark.asyncio
+async def test_call_llm_slow_call_enforces_timeout():
+    async def slow_create(**kwargs):
+        await asyncio.sleep(0.2)
+        return create_mock_completion()
+
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create.side_effect = slow_create
+
+    req = LLMRequest(prompt="Hang", request_id="req_slow", timeout_seconds=0.01)
+    with pytest.raises(LLMTimeoutError, match=r"req_slow.*0\.01s"):
+        await call_llm(req, client=mock_client)

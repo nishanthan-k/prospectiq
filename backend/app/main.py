@@ -1,10 +1,10 @@
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 from app.core.config import get_settings
 from app.core.logger import log
 
-from app.llm.client import LLMRequest, LLMResponse, call_llm
+from app.llm.client import LLMRequest, LLMResponse, LLMTimeoutError, call_llm
 
 settings = get_settings()
 
@@ -22,7 +22,10 @@ def health_check():
 
 @app.post("/chat", response_model=LLMResponse)
 async def chat(request: LLMRequest):
-    return await call_llm(request)
+    try:
+        return await call_llm(request)
+    except LLMTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
 
 
 if __name__ == "__main__":
