@@ -67,6 +67,14 @@ async def test_chat_timeout_seconds_out_of_bounds(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_chat_max_retries_out_of_bounds(client: AsyncClient):
+    response = await client.post("/api/chat", json={"prompt": "Hello", "max_retries": -1})
+    assert response.status_code == 422
+    errors = response.json()["detail"]
+    assert any("greater than or equal to 0" in err["msg"] for err in errors)
+
+
+@pytest.mark.asyncio
 async def test_chat_timeout_returns_504(client: AsyncClient):
     with patch(
         "app.main.call_llm",

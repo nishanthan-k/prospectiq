@@ -1,9 +1,22 @@
 import asyncio
 import time
 import uuid
-from typing import Optional, Union
-from groq import APITimeoutError, AsyncGroq
+from typing import Callable, Optional, Union
+from groq import (
+    APIConnectionError,
+    APITimeoutError,
+    AsyncGroq,
+    InternalServerError,
+    RateLimitError,
+)
 from pydantic import BaseModel, Field, field_validator
+from tenacity import (
+    AsyncRetrying,
+    RetryCallState,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from app.core.config import get_settings
 from app.core.logger import log
@@ -53,6 +66,11 @@ class LLMRequest(BaseModel):
         gt=0,
         description="Optional per-request timeout in seconds (defaults to global setting)",
     )
+    max_retries: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Optional per-request retry count after initial failure (defaults to global)",
+    )
 
     @field_validator("prompt")
     @classmethod
@@ -84,9 +102,36 @@ class LLMTimeoutError(Exception):
         super().__init__(f"LLM request [{request_id}] timed out after {timeout_seconds}s")
 
 
+RETRYABLE_ERRORS = (
+    APIConnectionError,
+    APITimeoutError,
+    TimeoutError,
+    RateLimitError,
+    InternalServerError,
+)
+
+
+def _make_before_sleep_logger(
+    request_id: str, max_retries: int
+) -> Callable[[RetryCallState], None]:
+    def _log_retry(retry_state: RetryCallState) -> None:
+        exc = retry_state.outcome.exception() if retry_state.outcome else None
+        wait_s = retry_state.next_action.sleep if retry_state.next_action else 0.0
+        log.warning(
+            f"[{request_id}] LLM attempt {retry_state.attempt_number}/{max_retries + 1} "
+            f"failed ({exc}); retrying in {wait_s:.2f}s"
+        )
+
+    return _log_retry
+
+
 def get_groq_client() -> AsyncGroq:
     """Return an AsyncGroq client instance."""
-    return AsyncGroq(api_key=settings.groq_api_key, timeout=settings.llm_timeout_seconds)
+    return AsyncGroq(
+        api_key=settings.groq_api_key,
+        timeout=settings.llm_timeout_seconds,
+        max_retries=0,
+    )
 
 
 async def call_llm(
@@ -112,6 +157,7 @@ async def call_llm(
     timeout_seconds = (
         req.timeout_seconds if req.timeout_seconds is not None else settings.llm_timeout_seconds
     )
+    max_retries = req.max_retries if req.max_retries is not None else settings.llm_max_retries
     groq_client = client or get_groq_client()
 
     messages = []
@@ -122,23 +168,36 @@ async def call_llm(
     log.info(
         f"[{request_id}] LLM call started: model={req.model}, "
         f"temperature={req.temperature}, max_tokens={req.max_tokens}, "
-        f"timeout={timeout_seconds}s"
+        f"timeout={timeout_seconds}s, max_retries={max_retries}"
     )
 
     start_time = time.perf_counter()
 
+    retryer = AsyncRetrying(
+        stop=stop_after_attempt(max_retries + 1),
+        wait=wait_exponential(
+            min=settings.llm_retry_min_wait,
+            max=settings.llm_retry_max_wait,
+        ),
+        retry=retry_if_exception_type(RETRYABLE_ERRORS),
+        before_sleep=_make_before_sleep_logger(request_id, max_retries),
+        reraise=True,
+    )
+
     try:
-        response = await asyncio.wait_for(
-            groq_client.chat.completions.create(
-                model=req.model,
-                messages=messages,  # type: ignore
-                temperature=req.temperature,
-                max_tokens=req.max_tokens,
-                top_p=req.top_p,
-                timeout=timeout_seconds,
-            ),
-            timeout=timeout_seconds,
-        )
+        async for attempt in retryer:
+            with attempt:
+                response = await asyncio.wait_for(
+                    groq_client.chat.completions.create(
+                        model=req.model,
+                        messages=messages,  # type: ignore
+                        temperature=req.temperature,
+                        max_tokens=req.max_tokens,
+                        top_p=req.top_p,
+                        timeout=timeout_seconds,
+                    ),
+                    timeout=timeout_seconds,
+                )
     except (APITimeoutError, TimeoutError) as exc:
         latency_ms = (time.perf_counter() - start_time) * 1000.0
         log.error(
