@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     fast_model: str = "openai/gpt-oss-20b"
     host: str = "0.0.0.0"
     port: int = 8000
+    log_level: str = "INFO"
+    log_format: str = "text"
     llm_timeout_seconds: float = Field(default=30.0, gt=0)
     llm_max_retries: int = Field(default=3, ge=0)
     llm_retry_min_wait: float = Field(default=1.0, ge=0)
