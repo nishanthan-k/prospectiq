@@ -1,10 +1,10 @@
 import uvicorn
-from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from app.core.config import get_settings
 from app.core.logger import log
-
-from app.llm.client import LLMRequest, LLMResponse, LLMTimeoutError, call_llm
+from app.llm import LLMRequest, LLMResponse, LLMTimeoutError, call_llm
 
 settings = get_settings()
 
@@ -13,6 +13,11 @@ app = FastAPI(
     description="AI Sales Intelligence & Outreach Agent API",
     version="0.1.0",
 )
+
+
+@app.exception_handler(LLMTimeoutError)
+async def llm_timeout_handler(_request: Request, exc: LLMTimeoutError) -> JSONResponse:
+    return JSONResponse(status_code=504, content={"detail": str(exc)})
 
 
 api_router = APIRouter(prefix="/api")
@@ -25,10 +30,7 @@ def health_check():
 
 @api_router.post("/chat", response_model=LLMResponse)
 async def chat(request: LLMRequest):
-    try:
-        return await call_llm(request)
-    except LLMTimeoutError as exc:
-        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    return await call_llm(request)
 
 
 app.include_router(api_router)

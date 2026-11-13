@@ -5,7 +5,7 @@ import pytest
 from groq import APIConnectionError, APITimeoutError, BadRequestError, RateLimitError
 
 from app.core.config import get_settings
-from app.llm.client import LLMRequest, LLMTimeoutError, call_llm
+from app.llm import LLMRequest, LLMTimeoutError, call_llm
 
 
 def create_mock_completion(

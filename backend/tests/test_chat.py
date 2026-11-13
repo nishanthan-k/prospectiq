@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from httpx import AsyncClient
 
-from app.llm.client import LLMResponse, LLMTimeoutError
+from app.llm import LLMResponse, LLMTimeoutError
 
 
 @pytest.mark.asyncio

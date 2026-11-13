@@ -135,23 +135,23 @@ def get_groq_client() -> AsyncGroq:
 
 
 async def call_llm(
-    request: Union[str, LLMRequest, dict],
+    params: Union[LLMRequest, str, dict],
     client: Optional[AsyncGroq] = None,
 ) -> LLMResponse:
     """
     Execute an LLM call using Groq with request correlation and latency tracking.
 
     Accepts:
+    - Pydantic model: call_llm(LLMRequest(prompt="...", temperature=0.2))
     - Raw prompt string: call_llm("Analyze this company")
     - Dictionary: call_llm({"prompt": "...", "temperature": 0.2})
-    - Pydantic model: call_llm(LLMRequest(prompt="..."))
     """
-    if isinstance(request, str):
-        req = LLMRequest(prompt=request)
-    elif isinstance(request, dict):
-        req = LLMRequest(**request)
+    if isinstance(params, str):
+        req = LLMRequest(prompt=params)
+    elif isinstance(params, dict):
+        req = LLMRequest(**params)
     else:
-        req = request
+        req = params
 
     request_id = req.request_id or f"req_{uuid.uuid4().hex[:8]}"
     timeout_seconds = (
