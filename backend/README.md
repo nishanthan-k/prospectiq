@@ -94,7 +94,7 @@ Sends a prompt to the Groq LLM with sales intelligence system prompt and returns
 }
 ```
 
-_All fields except `prompt` are optional and have sensible defaults._
+_All fields except `prompt` are optional (`temperature`, `max_tokens`, `top_p`, `model`, `system_prompt`, `request_id`, `timeout_seconds`, `max_retries`, `stream`). Defaults to `stream: false` returning JSON; when `stream: true`, returns Server-Sent Events (`text/event-stream`)._
 
 **Response (`200 OK`):**
 

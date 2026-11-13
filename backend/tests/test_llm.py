@@ -1,5 +1,7 @@
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock
+from fastapi.responses import StreamingResponse
 import httpx
 import pytest
 from groq import APIConnectionError, APITimeoutError, BadRequestError, RateLimitError
@@ -214,3 +216,97 @@ async def test_call_llm_non_retryable_error_fails_immediately():
         await call_llm(LLMRequest(prompt="Hello", max_retries=3), client=mock_client)
 
     assert mock_client.chat.completions.create.call_count == 1
+
+
+def create_mock_stream_chunk(
+    content: str | None = None,
+    finish_reason: str | None = None,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+):
+    mock_delta = MagicMock()
+    mock_delta.content = content
+
+    mock_choice = MagicMock()
+    mock_choice.delta = mock_delta
+    mock_choice.finish_reason = finish_reason
+
+    mock_chunk = MagicMock()
+    mock_chunk.choices = [mock_choice]
+    mock_chunk.usage = None
+    mock_chunk.x_groq = None
+
+    if prompt_tokens is not None and completion_tokens is not None:
+        mock_usage = MagicMock()
+        mock_usage.prompt_tokens = prompt_tokens
+        mock_usage.completion_tokens = completion_tokens
+        mock_usage.total_tokens = prompt_tokens + completion_tokens
+        mock_x_groq = MagicMock()
+        mock_x_groq.usage = mock_usage
+        mock_chunk.x_groq = mock_x_groq
+
+    return mock_chunk
+
+
+@pytest.mark.asyncio
+async def test_call_llm_streaming_success():
+    async def mock_chunks():
+        yield create_mock_stream_chunk(content="Hello ")
+        yield create_mock_stream_chunk(content="world!")
+        yield create_mock_stream_chunk(
+            content=None,
+            finish_reason="stop",
+            prompt_tokens=10,
+            completion_tokens=2,
+        )
+
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create.return_value = mock_chunks()
+
+    req = LLMRequest(prompt="Hi", request_id="req_stream_test", stream=True)
+    response = await call_llm(req, client=mock_client)
+    assert isinstance(response, StreamingResponse)
+    assert response.media_type == "text/event-stream"
+    events = [event async for event in response.body_iterator]
+
+    assert len(events) == 3
+    assert json.loads(events[0].removeprefix("data: ").strip()) == {
+        "request_id": "req_stream_test",
+        "delta": "Hello ",
+    }
+    assert json.loads(events[1].removeprefix("data: ").strip()) == {
+        "request_id": "req_stream_test",
+        "delta": "world!",
+    }
+    assert events[2].startswith("event: done\n")
+    done_data = json.loads(events[2].split("data: ", 1)[1].strip())
+    assert done_data["request_id"] == "req_stream_test"
+    assert done_data["total_tokens"] == 12
+
+
+@pytest.mark.asyncio
+async def test_call_llm_streaming_timeout_emits_error_event():
+    async def slow_chunks():
+        yield create_mock_stream_chunk(content="Partial ")
+        await asyncio.sleep(0.2)
+        yield create_mock_stream_chunk(content="never")
+
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create.return_value = slow_chunks()
+
+    req = LLMRequest(
+        prompt="Slow stream",
+        request_id="req_slow_stream",
+        stream=True,
+        timeout_seconds=0.02,
+        max_retries=0,
+    )
+    response = await call_llm(req, client=mock_client)
+    assert isinstance(response, StreamingResponse)
+    events = [event async for event in response.body_iterator]
+
+    assert len(events) == 2
+    assert '"delta": "Partial "' in events[0]
+    assert events[1].startswith("event: error\n")
+    err_data = json.loads(events[1].split("data: ", 1)[1].strip())
+    assert "timed out" in err_data["detail"]

@@ -1,5 +1,8 @@
+import json
+import json
 from unittest.mock import AsyncMock, patch
 import pytest
+from fastapi.responses import StreamingResponse
 from httpx import AsyncClient
 
 from app.llm import LLMResponse, LLMTimeoutError
@@ -88,3 +91,45 @@ async def test_chat_timeout_returns_504(client: AsyncClient):
     assert response.status_code == 504
     assert "req_timeout_504" in response.json()["detail"]
     assert "5.0s" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_chat_success_streams_sse(client: AsyncClient):
+    async def mock_stream():
+        yield f"data: {json.dumps({'request_id': 'req_test123', 'delta': 'Stripe is '})}\n\n"
+        yield f"data: {json.dumps({'request_id': 'req_test123', 'delta': 'a payments company.'})}\n\n"
+        yield f"event: done\ndata: {json.dumps({'request_id': 'req_test123', 'finish_reason': 'stop'})}\n\n"
+
+    mock_streaming_response = StreamingResponse(
+        mock_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+    with patch("app.main.call_llm", new=AsyncMock(return_value=mock_streaming_response)):
+        response = await client.post(
+            "/api/chat",
+            json={"prompt": "What does Stripe do?", "stream": True},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["cache-control"] == "no-cache"
+    assert '"delta": "Stripe is "' in response.text
+    assert '"delta": "a payments company."' in response.text
+    assert "event: done" in response.text
+
+
+@pytest.mark.asyncio
+async def test_chat_streaming_timeout_returns_504(client: AsyncClient):
+    with patch(
+        "app.main.call_llm",
+        new=AsyncMock(side_effect=LLMTimeoutError("req_stream_timeout", 5.0)),
+    ):
+        response = await client.post(
+            "/api/chat",
+            json={"prompt": "Hello", "stream": True, "timeout_seconds": 5.0},
+        )
+
+    assert response.status_code == 504
+    assert "req_stream_timeout" in response.json()["detail"]

@@ -4,7 +4,7 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import get_settings
 from app.core.logger import log
-from app.llm import LLMRequest, LLMResponse, LLMTimeoutError, call_llm
+from app.llm import LLMRequest, LLMTimeoutError, call_llm
 
 settings = get_settings()
 
@@ -28,7 +28,7 @@ def health_check():
     return {"status": "ok", "app": "ProspectIQ"}
 
 
-@api_router.post("/chat", response_model=LLMResponse)
+@api_router.post("/chat")
 async def chat(request: LLMRequest):
     return await call_llm(request)
 

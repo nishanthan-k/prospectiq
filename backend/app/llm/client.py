@@ -1,7 +1,11 @@
 import asyncio
+import inspect
+import json
 import time
 import uuid
-from typing import Callable, Optional, Union
+from collections.abc import AsyncIterator
+from typing import Any, Callable, Optional, Union
+from fastapi.responses import StreamingResponse
 from groq import (
     APIConnectionError,
     APITimeoutError,
@@ -71,6 +75,10 @@ class LLMRequest(BaseModel):
         ge=0,
         description="Optional per-request retry count after initial failure (defaults to global)",
     )
+    stream: bool = Field(
+        default=False,
+        description="Whether to stream the response as Server-Sent Events",
+    )
 
     @field_validator("prompt")
     @classmethod
@@ -134,18 +142,10 @@ def get_groq_client() -> AsyncGroq:
     )
 
 
-async def call_llm(
+def _prepare_request(
     params: Union[LLMRequest, str, dict],
-    client: Optional[AsyncGroq] = None,
-) -> LLMResponse:
-    """
-    Execute an LLM call using Groq with request correlation and latency tracking.
-
-    Accepts:
-    - Pydantic model: call_llm(LLMRequest(prompt="...", temperature=0.2))
-    - Raw prompt string: call_llm("Analyze this company")
-    - Dictionary: call_llm({"prompt": "...", "temperature": 0.2})
-    """
+    client: Optional[AsyncGroq],
+) -> tuple[LLMRequest, str, float, int, AsyncGroq, list[dict[str, str]]]:
     if isinstance(params, str):
         req = LLMRequest(prompt=params)
     elif isinstance(params, dict):
@@ -160,19 +160,24 @@ async def call_llm(
     max_retries = req.max_retries if req.max_retries is not None else settings.llm_max_retries
     groq_client = client or get_groq_client()
 
-    messages = []
+    messages: list[dict[str, str]] = []
     if req.system_prompt:
         messages.append({"role": "system", "content": req.system_prompt})
     messages.append({"role": "user", "content": req.prompt})
 
-    log.info(
-        f"[{request_id}] LLM call started: model={req.model}, "
-        f"temperature={req.temperature}, max_tokens={req.max_tokens}, "
-        f"timeout={timeout_seconds}s, max_retries={max_retries}"
-    )
+    return req, request_id, timeout_seconds, max_retries, groq_client, messages
 
-    start_time = time.perf_counter()
 
+async def _execute_create(
+    groq_client: AsyncGroq,
+    req: LLMRequest,
+    messages: list[dict[str, str]],
+    timeout_seconds: float,
+    max_retries: int,
+    request_id: str,
+    start_time: float,
+    stream: bool = False,
+) -> Any:
     retryer = AsyncRetrying(
         stop=stop_after_attempt(max_retries + 1),
         wait=wait_exponential(
@@ -187,13 +192,14 @@ async def call_llm(
     try:
         async for attempt in retryer:
             with attempt:
-                response = await asyncio.wait_for(
+                return await asyncio.wait_for(
                     groq_client.chat.completions.create(
                         model=req.model,
                         messages=messages,  # type: ignore
                         temperature=req.temperature,
                         max_tokens=req.max_tokens,
                         top_p=req.top_p,
+                        stream=stream,
                         timeout=timeout_seconds,
                     ),
                     timeout=timeout_seconds,
@@ -209,6 +215,107 @@ async def call_llm(
         latency_ms = (time.perf_counter() - start_time) * 1000.0
         log.error(f"[{request_id}] LLM call failed after {latency_ms:.0f}ms: {exc}")
         raise
+
+
+async def call_llm(
+    params: Union[LLMRequest, str, dict],
+    client: Optional[AsyncGroq] = None,
+) -> Union[LLMResponse, StreamingResponse]:
+    """
+    Execute an LLM call using Groq with request correlation and latency tracking.
+
+    When params.stream is True, returns a StreamingResponse with Server-Sent Events.
+    When params.stream is False (default), returns an LLMResponse.
+    """
+    req, request_id, timeout_seconds, max_retries, groq_client, messages = _prepare_request(
+        params, client
+    )
+
+    log.info(
+        f"[{request_id}] LLM call started: model={req.model}, "
+        f"temperature={req.temperature}, max_tokens={req.max_tokens}, "
+        f"timeout={timeout_seconds}s, max_retries={max_retries}, stream={req.stream}"
+    )
+
+    start_time = time.perf_counter()
+    response = await _execute_create(
+        groq_client,
+        req,
+        messages,
+        timeout_seconds,
+        max_retries,
+        request_id,
+        start_time,
+        stream=req.stream,
+    )
+
+    if req.stream:
+        async def _event_stream() -> AsyncIterator[str]:
+            finish_reason = "stop"
+            prompt_tokens = 0
+            completion_tokens = 0
+            total_tokens = 0
+
+            try:
+                async with asyncio.timeout(timeout_seconds):
+                    async for chunk in response:
+                        if chunk.choices:
+                            choice = chunk.choices[0]
+                            if choice.finish_reason:
+                                finish_reason = choice.finish_reason
+                            if choice.delta and choice.delta.content:
+                                yield f"data: {json.dumps({'request_id': request_id, 'delta': choice.delta.content})}\n\n"
+
+                        x_groq = getattr(chunk, "x_groq", None)
+                        chunk_usage = getattr(chunk, "usage", None) or (
+                            x_groq.usage if x_groq is not None else None
+                        )
+                        if chunk_usage:
+                            prompt_tokens = chunk_usage.prompt_tokens
+                            completion_tokens = chunk_usage.completion_tokens
+                            total_tokens = chunk_usage.total_tokens
+
+                latency_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
+                is_truncated = finish_reason == "length"
+                log.info(
+                    f"[{request_id}] LLM stream completed in {latency_ms:.0f}ms: "
+                    f"tokens={total_tokens} (prompt={prompt_tokens}, completion={completion_tokens}), "
+                    f"finish_reason={finish_reason}, is_truncated={is_truncated}"
+                )
+                done_payload = {
+                    "request_id": request_id,
+                    "finish_reason": finish_reason,
+                    "is_truncated": is_truncated,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens,
+                    "latency_ms": latency_ms,
+                }
+                yield f"event: done\ndata: {json.dumps(done_payload)}\n\n"
+            except (APITimeoutError, TimeoutError):
+                latency_ms = (time.perf_counter() - start_time) * 1000.0
+                log.error(f"[{request_id}] LLM stream timed out after {latency_ms:.0f}ms")
+                err_payload = {
+                    "request_id": request_id,
+                    "detail": f"LLM request [{request_id}] timed out after {timeout_seconds}s",
+                }
+                yield f"event: error\ndata: {json.dumps(err_payload)}\n\n"
+            except Exception as exc:
+                latency_ms = (time.perf_counter() - start_time) * 1000.0
+                log.error(f"[{request_id}] LLM stream failed after {latency_ms:.0f}ms: {exc}")
+                yield f"event: error\ndata: {json.dumps({'request_id': request_id, 'detail': str(exc)})}\n\n"
+            finally:
+                close_fn = getattr(response, "close", None)
+                if callable(close_fn):
+                    res = close_fn()
+                    if inspect.isawaitable(res):
+                        await res
+
+        return StreamingResponse(
+            _event_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )
 
     latency_ms = (time.perf_counter() - start_time) * 1000.0
 
