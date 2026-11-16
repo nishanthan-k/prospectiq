@@ -80,6 +80,10 @@ class LLMRequest(BaseModel):
         default=False,
         description="Whether to stream the response as Server-Sent Events",
     )
+    response_format: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Optional response format specification, e.g. {'type': 'json_object'}",
+    )
 
     @field_validator("prompt")
     @classmethod
@@ -207,16 +211,20 @@ async def _execute_create(
     try:
         async for attempt in retryer:
             with attempt:
+                kwargs: dict[str, Any] = {
+                    "model": req.model,
+                    "messages": messages,  # type: ignore
+                    "temperature": req.temperature,
+                    "max_tokens": req.max_tokens,
+                    "top_p": req.top_p,
+                    "stream": stream,
+                    "timeout": timeout_seconds,
+                }
+                if req.response_format:
+                    kwargs["response_format"] = req.response_format
+
                 return await asyncio.wait_for(
-                    groq_client.chat.completions.create(
-                        model=req.model,
-                        messages=messages,  # type: ignore
-                        temperature=req.temperature,
-                        max_tokens=req.max_tokens,
-                        top_p=req.top_p,
-                        stream=stream,
-                        timeout=timeout_seconds,
-                    ),
+                    groq_client.chat.completions.create(**kwargs),
                     timeout=timeout_seconds,
                 )
     except (APITimeoutError, TimeoutError) as exc:
@@ -227,6 +235,27 @@ async def _execute_create(
         )
         raise LLMTimeoutError(request_id, timeout_seconds) from exc
     except Exception as exc:
+        err_str = str(exc).lower()
+        if (
+            ("413" in err_str or "rate_limit" in err_str or "too large" in err_str)
+            and req.model == settings.default_model
+            and settings.fast_model != settings.default_model
+        ):
+            log.warning(
+                f"[{request_id}] Model {req.model} exceeded token limit ({exc}). "
+                f"Automatically falling back to fast model '{settings.fast_model}'"
+            )
+            req.model = settings.fast_model
+            return await _execute_create(
+                groq_client=groq_client,
+                req=req,
+                messages=messages,
+                timeout_seconds=timeout_seconds,
+                max_retries=max_retries,
+                request_id=request_id,
+                start_time=start_time,
+                stream=stream,
+            )
         latency_ms = (time.perf_counter() - start_time) * 1000.0
         log.error(f"[{request_id}] LLM call failed after {latency_ms:.0f}ms: {exc}")
         raise
