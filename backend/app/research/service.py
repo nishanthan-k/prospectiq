@@ -142,9 +142,11 @@ async def conduct_research(request: ResearchRequest) -> ResearchResponse:
         else:
             log.warning(f"[{request_id}] Provided domain '{primary_url}' failed SSRF validation: {reason}")
     else:
-        # Case B: Domain was omitted -> Search for official website
-        search_query = f"{request.company_name} official website"
+        # Case B: Domain was omitted -> Search for company domain
+        search_query = request.company_name
         search_results = await search_company(search_query, max_results=5)
+        if not search_results:
+            search_results = await search_company(f"{request.company_name} official website", max_results=5)
 
         urls_to_scrape: list[str] = []
         for sr in search_results:

@@ -1,3 +1,44 @@
+"""
+Security Module: URL Validation & SSRF Protection
+
+Security Architecture & DNS Rebinding (TOCTOU) Assessment:
+---------------------------------------------------------
+1. Application-Level Pre-Flight Validation:
+   The `validate_url()` function validates untrusted URLs against SSRF:
+   - Enforces strictly allowed HTTP and HTTPS schemes.
+   - Rejects credential injection (user:pass@host).
+   - Rejects local, internal, and multicast hostnames (e.g. localhost, *.local, *.internal).
+   - Rejects IP literals resolving to private (RFC 1918), loopback (127.0.0.0/8),
+     link-local/cloud metadata (169.254.0.0/16), IPv6 unique-local (fc00::/7), and reserved ranges.
+   - Pre-resolves hostnames using `socket.getaddrinfo()` to verify all resolved A/AAAA records
+     point to globally routable public IPs.
+
+2. DNS Rebinding / Time-of-Check to Time-of-Use (TOCTOU) Analysis:
+   In asynchronous Python networking using `httpx` (built on `httpcore` and `anyio`), establishing
+   an HTTP/HTTPS connection triggers an internal DNS resolution via the event loop's getaddrinfo.
+   Between `validate_url()` and the actual socket connection, an attacker controlling an authoritative
+   DNS server with zero TTL could theoretically return a public IP during pre-flight validation and
+   subsequently return a private IP (e.g. 127.0.0.1 or 169.254.169.254) when httpx connects.
+
+3. Connection-Level Pinning vs. Networking Fragility:
+   Forcing `httpx` to connect directly to pre-resolved IPs while preserving original Host headers,
+   HTTPS SNI (Server Name Indication), TLS certificate verification, connection pooling, and
+   HTTP/2 negotiation requires implementing an intrusive custom `httpcore.AsyncHTTPTransport`
+   or patching internal socket streams. Across Python/httpcore versions, custom socket stream
+   interceptors are notoriously fragile and prone to breaking connection pool lifecycle,
+   IPv4/IPv6 dual-stack fallback, and TLS hostname verification.
+
+4. Production Security Boundary & Defense-in-Depth Recommendations:
+   Before exposing company research and scraping endpoints to untrusted external users in production,
+   the remaining DNS rebinding window must be mitigated at the infrastructure boundary:
+   - Egress Firewall / Security Groups: Block egress traffic from scraper worker nodes to private
+     ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.169.254) at the VPC/iptables level.
+   - Dedicated Forward Proxy: Route outbound scraping requests through an egress proxy (e.g.,
+     Envoy, Squid, or Smokescreen) configured to reject private IP egress after single DNS resolution.
+   - Hardened Internal DNS: Employ resolving resolvers (e.g., CoreDNS, Unbound) with DNS rebinding
+     filtering (`private-address` directive) enabled to strip RFC 1918 addresses from public DNS responses.
+"""
+
 import ipaddress
 import socket
 import urllib.parse

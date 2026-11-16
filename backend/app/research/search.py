@@ -141,7 +141,7 @@ async def search_company(
 ) -> list[SearchResult]:
     """
     Search for target company information across public search engines without API keys.
-    Tries Bing first; if empty or fails, falls back to DuckDuckGo.
+    Tries DuckDuckGo first; if empty or fails, falls back to Bing.
     """
     should_close_client = False
     if client is None:

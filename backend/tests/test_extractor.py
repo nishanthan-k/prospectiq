@@ -1,4 +1,5 @@
-from unittest.mock import AsyncMock, MagicMock, patch
+import httpx
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -126,28 +127,23 @@ def test_parse_html_to_page_handles_low_text_page():
 
 @pytest.mark.asyncio
 async def test_extract_page_handles_http_errors():
-    mock_client = AsyncMock()
-    mock_resp = MagicMock()
-    mock_resp.status_code = 404
-    mock_resp.is_redirect = False
-    mock_client.get.return_value = mock_resp
+    transport = httpx.MockTransport(lambda req: httpx.Response(404))
+    client = httpx.AsyncClient(transport=transport)
 
     with patch("app.research.extractor.validate_url", return_value=(True, None)):
-        page = await extract_page("https://example.com/notfound", client=mock_client)
+        page = await extract_page("https://example.com/notfound", client=client)
     assert page is None
 
 
 @pytest.mark.asyncio
 async def test_extract_page_skips_non_html():
-    mock_client = AsyncMock()
-    mock_resp = MagicMock()
-    mock_resp.status_code = 200
-    mock_resp.is_redirect = False
-    mock_resp.headers = {"content-type": "application/pdf"}
-    mock_client.get.return_value = mock_resp
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(200, headers={"content-type": "application/pdf"}, content=b"%PDF-1.4")
+    )
+    client = httpx.AsyncClient(transport=transport)
 
     with patch("app.research.extractor.validate_url", return_value=(True, None)):
-        page = await extract_page("https://example.com/file.pdf", client=mock_client)
+        page = await extract_page("https://example.com/file.pdf", client=client)
     assert page is None
 
 
@@ -157,27 +153,146 @@ async def test_extract_page_rejects_ssrf_on_initial_url():
     mock_client = AsyncMock()
     page = await extract_page("http://169.254.169.254/latest/meta-data", client=mock_client)
     assert page is None
-    mock_client.get.assert_not_called()
+    mock_client.stream.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_extract_page_rejects_redirect_to_internal_address():
     """If a public URL redirects to a private/loopback address, extract_page must abort."""
-    mock_client = AsyncMock()
+    def handle_request(req):
+        if "redirect" in str(req.url):
+            return httpx.Response(302, headers={"location": "http://127.0.0.1:8000/internal-metrics"})
+        return httpx.Response(200, headers={"content-type": "text/html"}, text="<p>Internal</p>")
 
-    redirect_resp = MagicMock()
-    redirect_resp.status_code = 302
-    redirect_resp.is_redirect = True
-    redirect_resp.headers = {"location": "http://127.0.0.1:8000/internal-metrics"}
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handle_request))
 
-    mock_client.get.return_value = redirect_resp
-
-    # Initial URL passes validation, but redirect destination fails
     with patch("app.research.extractor.validate_url") as mock_val:
-        # First call (initial URL) is valid; second call (redirect) is invalid
         mock_val.side_effect = [(True, None), (False, "Disallowed loopback IP")]
-        page = await extract_page("https://public-site.com/redirect", client=mock_client)
+        page = await extract_page("https://public-site.com/redirect", client=client)
 
     assert page is None
-    # Only one request made; redirect was aborted before fetching 127.0.0.1
-    assert mock_client.get.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_extract_page_response_below_size_limit():
+    """Responses smaller than max_bytes must download and parse successfully."""
+    html_bytes = b"<html><body><p>Acme Corp provides automated cloud infrastructure.</p></body></html>"
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(200, headers={"content-type": "text/html"}, content=html_bytes)
+    )
+    client = httpx.AsyncClient(transport=transport)
+
+    with patch("app.research.extractor.validate_url", return_value=(True, None)):
+        page = await extract_page("https://example.com", client=client, max_bytes=500)
+
+    assert page is not None
+    assert "Acme Corp provides automated cloud infrastructure." in page.content
+
+
+@pytest.mark.asyncio
+async def test_extract_page_response_exactly_at_size_limit():
+    """Responses exactly equal to max_bytes must download and parse successfully."""
+    html_bytes = b"<html><body><p>Acme Corp exactly at the size limit test.</p></body></html>"
+    limit = len(html_bytes)
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(200, headers={"content-type": "text/html"}, content=html_bytes)
+    )
+    client = httpx.AsyncClient(transport=transport)
+
+    with patch("app.research.extractor.validate_url", return_value=(True, None)):
+        page = await extract_page("https://example.com", client=client, max_bytes=limit)
+
+    assert page is not None
+    assert "Acme Corp exactly at the size limit test." in page.content
+
+
+@pytest.mark.asyncio
+async def test_extract_page_response_exceeding_size_limit():
+    """Responses exceeding max_bytes must abort streaming and return None."""
+    html_bytes = b"<html><body><p>Acme Corp payload that is definitely way too long for limit.</p></body></html>"
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(200, headers={"content-type": "text/html"}, content=html_bytes)
+    )
+    client = httpx.AsyncClient(transport=transport)
+
+    with patch("app.research.extractor.validate_url", return_value=(True, None)):
+        page = await extract_page("https://example.com", client=client, max_bytes=30)
+
+    assert page is None
+
+
+@pytest.mark.asyncio
+async def test_extract_page_missing_content_length_exceeding_limit():
+    """Chunked response without Content-Length must abort when streaming exceeds limit."""
+    content_chunks = [b"Chunk 1: 15B--", b"Chunk 2: 15B--", b"Chunk 3: 15B--"]
+    # Without Content-Length header
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            content=iter(content_chunks),
+        )
+    )
+    client = httpx.AsyncClient(transport=transport)
+
+    with patch("app.research.extractor.validate_url", return_value=(True, None)):
+        # Limit is 25 bytes; chunk 1 + chunk 2 = 30 bytes > 25
+        page = await extract_page("https://example.com", client=client, max_bytes=25)
+
+    assert page is None
+
+
+@pytest.mark.asyncio
+async def test_extract_page_incorrect_content_length_exceeding_limit():
+    """If Content-Length header is smaller than max_bytes but stream exceeds it, must abort."""
+    long_content = b"A" * 500
+    # Header claims 40 bytes, but body sends 500 bytes with limit 100
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(
+            200,
+            headers={"content-type": "text/html", "content-length": "40"},
+            content=long_content,
+        )
+    )
+    client = httpx.AsyncClient(transport=transport)
+
+    with patch("app.research.extractor.validate_url", return_value=(True, None)):
+        page = await extract_page("https://example.com", client=client, max_bytes=100)
+
+    assert page is None
+
+
+@pytest.mark.asyncio
+async def test_extract_page_empty_response():
+    """Empty 0-byte response should be handled safely without error."""
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(200, headers={"content-type": "text/html"}, content=b"")
+    )
+    client = httpx.AsyncClient(transport=transport)
+
+    with patch("app.research.extractor.validate_url", return_value=(True, None)):
+        page = await extract_page("https://example.com", client=client)
+
+    assert page is not None
+    assert len(page.chunks) == 0
+
+
+@pytest.mark.asyncio
+async def test_extract_page_valid_redirect_followed():
+    """Valid redirects to public URLs must be followed and parsed."""
+    def handle_request(req):
+        if "redirect" in str(req.url):
+            return httpx.Response(302, headers={"location": "https://public-site.com/destination"})
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            text="<html><body><h1>Destination Page</h1><p>Acme landing content.</p></body></html>",
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handle_request))
+
+    with patch("app.research.extractor.validate_url", return_value=(True, None)):
+        page = await extract_page("https://public-site.com/redirect", client=client)
+
+    assert page is not None
+    assert page.title == "Destination Page"

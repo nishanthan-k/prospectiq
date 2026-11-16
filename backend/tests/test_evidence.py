@@ -358,3 +358,197 @@ async def test_synthesize_evidence_prompt_injection_containment():
     assert "PROMPT INJECTION RESISTANCE" in SYNTHESIS_SYSTEM_PROMPT
     assert is_insufficient is False
     assert len(citations) == 1
+
+
+@pytest.mark.asyncio
+async def test_synthesize_evidence_rejects_missing_required_fields():
+    """Missing summary, citations, or is_insufficient_evidence must fail schema validation."""
+    mock_chunks = [
+        RankedChunk(
+            url="https://acme.com",
+            chunk=(
+                "Acme Corporation delivers enterprise-grade cloud automation and developer platforms. "
+                "The system provides continuous integration, automated deployment workflows, security monitoring, "
+                "and multi-cloud management for engineering teams across hundreds of organizations worldwide. "
+                "Our software speeds up production release cycles and enhances code reliability."
+            ),
+            score=3.0,
+        )
+    ]
+    # Missing 'citations'
+    bad_payload = {
+        "summary": "Acme builds cloud infrastructure.",
+        "is_insufficient_evidence": False,
+    }
+    with patch("app.research.evidence.call_llm", new=AsyncMock(return_value=LLMResponse(
+        request_id="req1", content=json.dumps(bad_payload), finish_reason="stop",
+        prompt_tokens=100, completion_tokens=20, total_tokens=120, latency_ms=100.0,
+    ))):
+        summary, citations, is_insufficient, reasons = await synthesize_evidence(
+            company_name="Acme", domain="acme.com", ranked_chunks=mock_chunks, request_id="req1"
+        )
+    assert is_insufficient is True
+    assert len(citations) == 0
+    assert any("not valid structured JSON" in r for r in reasons)
+
+
+@pytest.mark.asyncio
+async def test_synthesize_evidence_rejects_citations_as_string():
+    """Citations provided as a string instead of a list must fail schema validation."""
+    mock_chunks = [
+        RankedChunk(
+            url="https://acme.com",
+            chunk=(
+                "Acme Corporation delivers enterprise-grade cloud automation and developer platforms. "
+                "The system provides continuous integration, automated deployment workflows, security monitoring, "
+                "and multi-cloud management for engineering teams across hundreds of organizations worldwide. "
+                "Our software speeds up production release cycles and enhances code reliability."
+            ),
+            score=3.0,
+        )
+    ]
+    bad_payload = {
+        "summary": "Acme builds cloud infrastructure.",
+        "citations": "not-an-array",
+        "is_insufficient_evidence": False,
+    }
+    with patch("app.research.evidence.call_llm", new=AsyncMock(return_value=LLMResponse(
+        request_id="req2", content=json.dumps(bad_payload), finish_reason="stop",
+        prompt_tokens=100, completion_tokens=20, total_tokens=120, latency_ms=100.0,
+    ))):
+        summary, citations, is_insufficient, reasons = await synthesize_evidence(
+            company_name="Acme", domain="acme.com", ranked_chunks=mock_chunks, request_id="req2"
+        )
+    assert is_insufficient is True
+    assert len(citations) == 0
+    assert any("not valid structured JSON" in r for r in reasons)
+
+
+@pytest.mark.asyncio
+async def test_synthesize_evidence_rejects_boolean_as_string():
+    """Boolean supplied as a string ('false' or 'true') must not be coerced and must fail validation."""
+    mock_chunks = [
+        RankedChunk(
+            url="https://acme.com",
+            chunk=(
+                "Acme Corporation delivers enterprise-grade cloud automation and developer platforms. "
+                "The system provides continuous integration, automated deployment workflows, security monitoring, "
+                "and multi-cloud management for engineering teams across hundreds of organizations worldwide. "
+                "Our software speeds up production release cycles and enhances code reliability."
+            ),
+            score=3.0,
+        )
+    ]
+    bad_payload = {
+        "summary": "Acme builds cloud infrastructure.",
+        "citations": [],
+        "is_insufficient_evidence": "false",  # String instead of strict bool
+    }
+    with patch("app.research.evidence.call_llm", new=AsyncMock(return_value=LLMResponse(
+        request_id="req3", content=json.dumps(bad_payload), finish_reason="stop",
+        prompt_tokens=100, completion_tokens=20, total_tokens=120, latency_ms=100.0,
+    ))):
+        summary, citations, is_insufficient, reasons = await synthesize_evidence(
+            company_name="Acme", domain="acme.com", ranked_chunks=mock_chunks, request_id="req3"
+        )
+    assert is_insufficient is True
+    assert len(citations) == 0
+    assert any("not valid structured JSON" in r for r in reasons)
+
+
+@pytest.mark.asyncio
+async def test_synthesize_evidence_rejects_invalid_citation_object():
+    """A citation object missing required fields (e.g. quote, source_url) must fail schema validation."""
+    mock_chunks = [
+        RankedChunk(
+            url="https://acme.com",
+            chunk=(
+                "Acme Corporation delivers enterprise-grade cloud automation and developer platforms. "
+                "The system provides continuous integration, automated deployment workflows, security monitoring, "
+                "and multi-cloud management for engineering teams across hundreds of organizations worldwide. "
+                "Our software speeds up production release cycles and enhances code reliability."
+            ),
+            score=3.0,
+        )
+    ]
+    bad_payload = {
+        "summary": "Acme builds cloud infrastructure.",
+        "citations": [{"claim": "Incomplete citation without quote"}],
+        "is_insufficient_evidence": False,
+    }
+    with patch("app.research.evidence.call_llm", new=AsyncMock(return_value=LLMResponse(
+        request_id="req4", content=json.dumps(bad_payload), finish_reason="stop",
+        prompt_tokens=100, completion_tokens=20, total_tokens=120, latency_ms=100.0,
+    ))):
+        summary, citations, is_insufficient, reasons = await synthesize_evidence(
+            company_name="Acme", domain="acme.com", ranked_chunks=mock_chunks, request_id="req4"
+        )
+    assert is_insufficient is True
+    assert len(citations) == 0
+    assert any("not valid structured JSON" in r for r in reasons)
+
+
+@pytest.mark.asyncio
+async def test_synthesize_evidence_rejects_unexpected_field_types():
+    """Unexpected field types (e.g. integer summary) must fail schema validation."""
+    mock_chunks = [
+        RankedChunk(
+            url="https://acme.com",
+            chunk=(
+                "Acme Corporation delivers enterprise-grade cloud automation and developer platforms. "
+                "The system provides continuous integration, automated deployment workflows, security monitoring, "
+                "and multi-cloud management for engineering teams across hundreds of organizations worldwide. "
+                "Our software speeds up production release cycles and enhances code reliability."
+            ),
+            score=3.0,
+        )
+    ]
+    bad_payload = {
+        "summary": 12345,  # int instead of str
+        "citations": [],
+        "is_insufficient_evidence": False,
+    }
+    with patch("app.research.evidence.call_llm", new=AsyncMock(return_value=LLMResponse(
+        request_id="req5", content=json.dumps(bad_payload), finish_reason="stop",
+        prompt_tokens=100, completion_tokens=20, total_tokens=120, latency_ms=100.0,
+    ))):
+        summary, citations, is_insufficient, reasons = await synthesize_evidence(
+            company_name="Acme", domain="acme.com", ranked_chunks=mock_chunks, request_id="req5"
+        )
+    assert is_insufficient is True
+    assert len(citations) == 0
+    assert any("not valid structured JSON" in r for r in reasons)
+
+
+@pytest.mark.asyncio
+async def test_synthesize_evidence_accepts_empty_summary_when_insufficient():
+    """When evidence is insufficient, an empty summary is valid and model reasons are preserved."""
+    mock_chunks = [
+        RankedChunk(
+            url="https://acme.com",
+            chunk=(
+                "Acme Corporation delivers enterprise-grade cloud automation and developer platforms. "
+                "The system provides continuous integration, automated deployment workflows, security monitoring, "
+                "and multi-cloud management for engineering teams across hundreds of organizations worldwide. "
+                "Our software speeds up production release cycles and enhances code reliability."
+            ),
+            score=3.0,
+        )
+    ]
+    payload = {
+        "summary": "",  # Empty summary because evidence is insufficient
+        "citations": [],
+        "is_insufficient_evidence": True,
+        "insufficient_reasons": ["The retrieved web sources describe a government employment portal, not the target company."],
+    }
+    with patch("app.research.evidence.call_llm", new=AsyncMock(return_value=LLMResponse(
+        request_id="req_insuff_empty_summary", content=json.dumps(payload), finish_reason="stop",
+        prompt_tokens=100, completion_tokens=30, total_tokens=130, latency_ms=100.0,
+    ))):
+        summary, citations, is_insufficient, reasons = await synthesize_evidence(
+            company_name="NCS India", domain=None, ranked_chunks=mock_chunks, request_id="req_insuff_empty_summary"
+        )
+    assert is_insufficient is True
+    assert len(citations) == 0
+    assert "Unable to synthesize complete research" in summary
+    assert "The retrieved web sources describe a government employment portal" in reasons[0]
