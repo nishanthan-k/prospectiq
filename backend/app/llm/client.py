@@ -5,6 +5,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any, Callable, Optional, Union
+
 from fastapi.responses import StreamingResponse
 from groq import (
     APIConnectionError,
@@ -133,13 +134,27 @@ def _make_before_sleep_logger(
     return _log_retry
 
 
+_groq_client: Optional[AsyncGroq] = None
+
+
 def get_groq_client() -> AsyncGroq:
-    """Return an AsyncGroq client instance."""
-    return AsyncGroq(
-        api_key=settings.groq_api_key,
-        timeout=settings.llm_timeout_seconds,
-        max_retries=0,
-    )
+    """Return the singleton AsyncGroq client instance, creating it if needed."""
+    global _groq_client
+    if _groq_client is None:
+        _groq_client = AsyncGroq(
+            api_key=settings.groq_api_key,
+            timeout=settings.llm_timeout_seconds,
+            max_retries=0,
+        )
+    return _groq_client
+
+
+async def close_groq_client() -> None:
+    """Close the singleton AsyncGroq client and reset it."""
+    global _groq_client
+    if _groq_client is not None:
+        await _groq_client.close()
+        _groq_client = None
 
 
 def _prepare_request(
