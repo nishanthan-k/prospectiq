@@ -17,8 +17,11 @@ BOILERPLATE_TERMS = {
 
 RECRUITMENT_TERMS = {
     "job opening",
+    "job openings",
+    "open positions",
     "we're hiring",
     "we are hiring",
+    "careers",
     "apply now",
     "job description",
     "salary",
@@ -28,6 +31,21 @@ RECRUITMENT_TERMS = {
     "experience level",
     "employment type",
     "equal opportunity employer",
+}
+
+GENERIC_LEGAL_SUFFIXES = {
+    "private",
+    "limited",
+    "ltd",
+    "pvt",
+    "corp",
+    "corporation",
+    "inc",
+    "incorporated",
+    "co",
+    "company",
+    "llc",
+    "group",
 }
 
 # Universal commercial offering indicators across all company types (product, media, software, services, retail, etc.)
@@ -77,13 +95,16 @@ def score_chunk(
     # Penalize job postings and recruitment boilerplate
     for recruit in RECRUITMENT_TERMS:
         if recruit in chunk_lower:
-            score -= 3.0
+            score -= 5.0
 
-    # Company name match
-    company_tokens = re.findall(r"\w+", company_name.lower())
+    # Company name match (boost distinctive brand tokens, ignore generic legal suffixes)
+    company_tokens = [w for w in re.findall(r"\w+", company_name.lower()) if len(w) > 2]
     for token in company_tokens:
-        if len(token) > 2 and token in chunk_lower:
-            score += 1.0
+        if token in chunk_lower:
+            if token not in GENERIC_LEGAL_SUFFIXES:
+                score += 2.0
+            else:
+                score += 0.5
 
     # Universal commercial offering indicators
     for term in BUSINESS_OFFERING_TERMS:
