@@ -160,11 +160,14 @@ async def extract_page(
     client: Optional[httpx.AsyncClient] = None,
     timeout_seconds: float = 8.0,
     max_redirects: int = 3,
+    max_bytes: int = MAX_PAGE_CONTENT_BYTES,
 ) -> Optional[ExtractedPage]:
     """
     Fetch webpage HTML and extract clean text using BeautifulSoup.
-    Enforces SSRF validation on the initial URL and on all redirect hops.
-    Enforces maximum response size limits.
+    - Enforces SSRF validation on the initial URL and on all redirect hops.
+    - Enforces HTTP streaming to read response bytes incrementally.
+    - Stops reading as soon as max_bytes is reached (even with chunked or missing Content-Length).
+    - Decodes text safely and parses with BeautifulSoup.
     """
     should_close_client = False
     if client is None:
@@ -173,7 +176,6 @@ async def extract_page(
 
     try:
         current_url = url
-        final_response: Optional[httpx.Response] = None
 
         # Manual redirect loop to validate each hop against SSRF
         for _ in range(max_redirects + 1):
@@ -182,39 +184,62 @@ async def extract_page(
                 log.warning(f"SSRF check rejected URL '{current_url}': {hop_reason}")
                 return None
 
-            response = await client.get(current_url, follow_redirects=False)
+            async with client.stream("GET", current_url, follow_redirects=False) as response:
+                if response.is_redirect:
+                    location = response.headers.get("location")
+                    if not location:
+                        log.warning(f"Redirect from {current_url} missing Location header.")
+                        return None
+                    current_url = urllib.parse.urljoin(current_url, location)
+                    continue
 
-            if response.is_redirect:
-                location = response.headers.get("location")
-                if not location:
-                    log.warning(f"Redirect from {current_url} missing Location header.")
-                    break
-                current_url = urllib.parse.urljoin(current_url, location)
-            else:
-                final_response = response
-                break
+                if response.status_code != 200:
+                    log.warning(f"Failed to fetch {current_url}: HTTP {response.status_code}")
+                    return None
 
-        if not final_response:
-            log.warning(f"Exceeded max redirects ({max_redirects}) for {url}")
-            return None
+                content_type = response.headers.get("content-type", "")
+                if "text/html" not in content_type and "application/xhtml" not in content_type:
+                    log.info(f"Skipping non-HTML resource {current_url} ({content_type})")
+                    return None
 
-        if final_response.status_code != 200:
-            log.warning(f"Failed to fetch {current_url}: HTTP {final_response.status_code}")
-            return None
+                # Check Content-Length if present and valid
+                content_length_hdr = response.headers.get("content-length")
+                if content_length_hdr:
+                    try:
+                        cl = int(content_length_hdr)
+                        if cl > max_bytes:
+                            log.warning(
+                                f"Response Content-Length {cl} exceeds limit {max_bytes} for {current_url}"
+                            )
+                            return None
+                    except ValueError:
+                        pass
 
-        # Response size limit check
-        content_length = final_response.headers.get("content-length")
-        if content_length and int(content_length) > MAX_PAGE_CONTENT_BYTES:
-            log.warning(f"Response size {content_length} exceeds limit {MAX_PAGE_CONTENT_BYTES} for {current_url}")
-            return None
+                # Stream response bytes incrementally up to max_bytes
+                chunks: list[bytes] = []
+                total_bytes = 0
+                exceeded = False
 
-        content_type = final_response.headers.get("content-type", "")
-        if "text/html" not in content_type and "application/xhtml" not in content_type:
-            log.info(f"Skipping non-HTML resource {current_url} ({content_type})")
-            return None
+                async for chunk in response.aiter_bytes():
+                    total_bytes += len(chunk)
+                    if total_bytes > max_bytes:
+                        log.warning(
+                            f"Response size exceeded limit ({max_bytes} bytes) during streaming for {current_url}"
+                        )
+                        exceeded = True
+                        break
+                    chunks.append(chunk)
 
-        text_content = final_response.text[:MAX_PAGE_CONTENT_BYTES]
-        return parse_html_to_page(current_url, text_content)
+                if exceeded:
+                    return None
+
+                encoding = response.encoding or "utf-8"
+                raw_bytes = b"".join(chunks)
+                text_content = raw_bytes.decode(encoding, errors="replace")
+                return parse_html_to_page(current_url, text_content)
+
+        log.warning(f"Exceeded max redirects ({max_redirects}) for {url}")
+        return None
     except Exception as exc:
         log.warning(f"Error extracting page from {url}: {exc}")
         return None
