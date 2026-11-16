@@ -110,3 +110,47 @@ _All fields except `prompt` are optional (`temperature`, `max_tokens`, `top_p`, 
   "latency_ms": 712.45
 }
 ```
+
+---
+
+### `POST /api/research`
+
+Researches a target company and extracts verifiable citations with evidence insufficiency checks.
+
+**Request Body (`application/json`):**
+
+```json
+{
+  "company_name": "Stripe",
+  "domain": "stripe.com",
+  "summary": "Fintech startup providing payments infrastructure"
+}
+```
+
+_`company_name` is mandatory. `domain` and `summary` (existing CRM notes/context) are optional._
+
+**Response (`200 OK`):**
+
+```json
+{
+  "request_id": "res_8f1a23c0",
+  "company_name": "Stripe",
+  "domain": "stripe.com",
+  "summary": "Stripe is a financial infrastructure platform for businesses, powering online and in-person payments.",
+  "citations": [
+    {
+      "claim": "Stripe provides global payments infrastructure with developer APIs.",
+      "quote": "Millions of companies use Stripe to accept payments, grow revenue, and accelerate new business.",
+      "source_url": "https://stripe.com",
+      "relevance_score": 0.95,
+      "criterion": "B2B SaaS business model"
+    }
+  ],
+  "is_insufficient_evidence": false,
+  "insufficient_reasons": [],
+  "sources_scraped": [
+    "https://stripe.com"
+  ],
+  "latency_ms": 520.10
+}
+```

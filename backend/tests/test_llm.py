@@ -1,9 +1,10 @@
 import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
-from fastapi.responses import StreamingResponse
+
 import httpx
 import pytest
+from fastapi.responses import StreamingResponse
 from groq import APIConnectionError, APITimeoutError, BadRequestError, RateLimitError
 
 from app.core.config import get_settings
