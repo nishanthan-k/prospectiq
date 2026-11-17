@@ -119,7 +119,7 @@ def score_chunk(
             score += (matches / len(summary_tokens)) * 1.5
 
     # Optional qualification criteria matches
-    for criterion in (qualification_criteria or []):
+    for criterion in qualification_criteria or []:
         words = [w for w in re.findall(r"\w+", criterion.lower()) if len(w) > 3]
         if not words:
             continue

@@ -15,10 +15,13 @@ from app.research.ranker import RankedChunk
 
 def test_safe_parse_json_handles_various_formats():
     # 1. Clean JSON
-    assert _safe_parse_json('{"summary": "Test", "citations": []}') == {"summary": "Test", "citations": []}
+    assert _safe_parse_json('{"summary": "Test", "citations": []}') == {
+        "summary": "Test",
+        "citations": [],
+    }
 
     # 2. Markdown fenced with surrounding text
-    fenced = "Here is the response:\n```json\n{\"summary\": \"Test\", \"citations\": []}\n```\nHope this helps!"
+    fenced = 'Here is the response:\n```json\n{"summary": "Test", "citations": []}\n```\nHope this helps!'
     assert _safe_parse_json(fenced) == {"summary": "Test", "citations": []}
 
     # 3. Trailing commas
@@ -26,7 +29,9 @@ def test_safe_parse_json_handles_various_formats():
     assert _safe_parse_json(trailing) == {"summary": "Test", "citations": [], "extra": 1}
 
     # 4. Thinking/reasoning tags with braces
-    thinking = "<think> The user wants { JSON } formatting </think>\n{\"summary\": \"Test\", \"citations\": []}"
+    thinking = (
+        '<think> The user wants { JSON } formatting </think>\n{"summary": "Test", "citations": []}'
+    )
     assert _safe_parse_json(thinking) == {"summary": "Test", "citations": []}
 
     # 5. Single-quoted Python dict
@@ -189,7 +194,9 @@ async def test_synthesize_evidence_handles_llm_failure():
         )
     ]
 
-    with patch("app.research.evidence.call_llm", side_effect=RuntimeError("Groq API rate limit exceeded")):
+    with patch(
+        "app.research.evidence.call_llm", side_effect=RuntimeError("Groq API rate limit exceeded")
+    ):
         summary, citations, is_insufficient, reasons = await synthesize_evidence(
             company_name="Example Corp",
             domain="example.com",
@@ -380,10 +387,20 @@ async def test_synthesize_evidence_rejects_missing_required_fields():
         "summary": "Acme builds cloud infrastructure.",
         "is_insufficient_evidence": False,
     }
-    with patch("app.research.evidence.call_llm", new=AsyncMock(return_value=LLMResponse(
-        request_id="req1", content=json.dumps(bad_payload), finish_reason="stop",
-        prompt_tokens=100, completion_tokens=20, total_tokens=120, latency_ms=100.0,
-    ))):
+    with patch(
+        "app.research.evidence.call_llm",
+        new=AsyncMock(
+            return_value=LLMResponse(
+                request_id="req1",
+                content=json.dumps(bad_payload),
+                finish_reason="stop",
+                prompt_tokens=100,
+                completion_tokens=20,
+                total_tokens=120,
+                latency_ms=100.0,
+            )
+        ),
+    ):
         summary, citations, is_insufficient, reasons = await synthesize_evidence(
             company_name="Acme", domain="acme.com", ranked_chunks=mock_chunks, request_id="req1"
         )
@@ -412,10 +429,20 @@ async def test_synthesize_evidence_rejects_citations_as_string():
         "citations": "not-an-array",
         "is_insufficient_evidence": False,
     }
-    with patch("app.research.evidence.call_llm", new=AsyncMock(return_value=LLMResponse(
-        request_id="req2", content=json.dumps(bad_payload), finish_reason="stop",
-        prompt_tokens=100, completion_tokens=20, total_tokens=120, latency_ms=100.0,
-    ))):
+    with patch(
+        "app.research.evidence.call_llm",
+        new=AsyncMock(
+            return_value=LLMResponse(
+                request_id="req2",
+                content=json.dumps(bad_payload),
+                finish_reason="stop",
+                prompt_tokens=100,
+                completion_tokens=20,
+                total_tokens=120,
+                latency_ms=100.0,
+            )
+        ),
+    ):
         summary, citations, is_insufficient, reasons = await synthesize_evidence(
             company_name="Acme", domain="acme.com", ranked_chunks=mock_chunks, request_id="req2"
         )
@@ -425,8 +452,8 @@ async def test_synthesize_evidence_rejects_citations_as_string():
 
 
 @pytest.mark.asyncio
-async def test_synthesize_evidence_rejects_boolean_as_string():
-    """Boolean supplied as a string ('false' or 'true') must not be coerced and must fail validation."""
+async def test_synthesize_evidence_accepts_boolean_as_string():
+    """Boolean supplied as a string ('false' or 'true') in JSON should be parsed safely without schema crash."""
     mock_chunks = [
         RankedChunk(
             url="https://acme.com",
@@ -439,21 +466,31 @@ async def test_synthesize_evidence_rejects_boolean_as_string():
             score=3.0,
         )
     ]
-    bad_payload = {
+    payload = {
         "summary": "Acme builds cloud infrastructure.",
         "citations": [],
-        "is_insufficient_evidence": "false",  # String instead of strict bool
+        "is_insufficient_evidence": "false",  # String from LLM
+        "insufficient_reasons": [],
     }
-    with patch("app.research.evidence.call_llm", new=AsyncMock(return_value=LLMResponse(
-        request_id="req3", content=json.dumps(bad_payload), finish_reason="stop",
-        prompt_tokens=100, completion_tokens=20, total_tokens=120, latency_ms=100.0,
-    ))):
+    with patch(
+        "app.research.evidence.call_llm",
+        new=AsyncMock(
+            return_value=LLMResponse(
+                request_id="req3",
+                content=json.dumps(payload),
+                finish_reason="stop",
+                prompt_tokens=100,
+                completion_tokens=20,
+                total_tokens=120,
+                latency_ms=100.0,
+            )
+        ),
+    ):
         summary, citations, is_insufficient, reasons = await synthesize_evidence(
             company_name="Acme", domain="acme.com", ranked_chunks=mock_chunks, request_id="req3"
         )
-    assert is_insufficient is True
-    assert len(citations) == 0
-    assert any("not valid structured JSON" in r for r in reasons)
+    assert "not valid structured JSON" not in (reasons[0] if reasons else "")
+    assert "No verifiable citations could be grounded" in (reasons[0] if reasons else "")
 
 
 @pytest.mark.asyncio
@@ -476,10 +513,20 @@ async def test_synthesize_evidence_rejects_invalid_citation_object():
         "citations": [{"claim": "Incomplete citation without quote"}],
         "is_insufficient_evidence": False,
     }
-    with patch("app.research.evidence.call_llm", new=AsyncMock(return_value=LLMResponse(
-        request_id="req4", content=json.dumps(bad_payload), finish_reason="stop",
-        prompt_tokens=100, completion_tokens=20, total_tokens=120, latency_ms=100.0,
-    ))):
+    with patch(
+        "app.research.evidence.call_llm",
+        new=AsyncMock(
+            return_value=LLMResponse(
+                request_id="req4",
+                content=json.dumps(bad_payload),
+                finish_reason="stop",
+                prompt_tokens=100,
+                completion_tokens=20,
+                total_tokens=120,
+                latency_ms=100.0,
+            )
+        ),
+    ):
         summary, citations, is_insufficient, reasons = await synthesize_evidence(
             company_name="Acme", domain="acme.com", ranked_chunks=mock_chunks, request_id="req4"
         )
@@ -508,10 +555,20 @@ async def test_synthesize_evidence_rejects_unexpected_field_types():
         "citations": [],
         "is_insufficient_evidence": False,
     }
-    with patch("app.research.evidence.call_llm", new=AsyncMock(return_value=LLMResponse(
-        request_id="req5", content=json.dumps(bad_payload), finish_reason="stop",
-        prompt_tokens=100, completion_tokens=20, total_tokens=120, latency_ms=100.0,
-    ))):
+    with patch(
+        "app.research.evidence.call_llm",
+        new=AsyncMock(
+            return_value=LLMResponse(
+                request_id="req5",
+                content=json.dumps(bad_payload),
+                finish_reason="stop",
+                prompt_tokens=100,
+                completion_tokens=20,
+                total_tokens=120,
+                latency_ms=100.0,
+            )
+        ),
+    ):
         summary, citations, is_insufficient, reasons = await synthesize_evidence(
             company_name="Acme", domain="acme.com", ranked_chunks=mock_chunks, request_id="req5"
         )
@@ -539,16 +596,131 @@ async def test_synthesize_evidence_accepts_empty_summary_when_insufficient():
         "summary": "",  # Empty summary because evidence is insufficient
         "citations": [],
         "is_insufficient_evidence": True,
-        "insufficient_reasons": ["The retrieved web sources describe a government employment portal, not the target company."],
+        "insufficient_reasons": [
+            "The retrieved web sources describe a government employment portal, not the target company."
+        ],
     }
-    with patch("app.research.evidence.call_llm", new=AsyncMock(return_value=LLMResponse(
-        request_id="req_insuff_empty_summary", content=json.dumps(payload), finish_reason="stop",
-        prompt_tokens=100, completion_tokens=30, total_tokens=130, latency_ms=100.0,
-    ))):
+    with patch(
+        "app.research.evidence.call_llm",
+        new=AsyncMock(
+            return_value=LLMResponse(
+                request_id="req_insuff_empty_summary",
+                content=json.dumps(payload),
+                finish_reason="stop",
+                prompt_tokens=100,
+                completion_tokens=30,
+                total_tokens=130,
+                latency_ms=100.0,
+            )
+        ),
+    ):
         summary, citations, is_insufficient, reasons = await synthesize_evidence(
-            company_name="NCS India", domain=None, ranked_chunks=mock_chunks, request_id="req_insuff_empty_summary"
+            company_name="NCS India",
+            domain=None,
+            ranked_chunks=mock_chunks,
+            request_id="req_insuff_empty_summary",
         )
     assert is_insufficient is True
     assert len(citations) == 0
     assert "Unable to synthesize complete research" in summary
     assert "The retrieved web sources describe a government employment portal" in reasons[0]
+
+
+def test_normalize_text_handles_smart_quotes_and_unicode_dashes():
+    """_normalize_text should convert smart quotes, curly quotes, em-dashes, and non-breaking spaces to standard ASCII."""
+    from app.research.evidence import _normalize_text
+
+    raw = "Here\u2019s the company\u2014it\u201cs innovation\u00a0leader\u201d with \u2018quality\u2019 services."
+    normalized = _normalize_text(raw)
+    assert normalized == "here's the company-it\"s innovation leader\" with 'quality' services."
+
+
+def test_verify_and_clean_citations_normalizes_unicode_quotes_and_dashes():
+    """Quotes citing text that has smart quotes or em dashes should match cleanly when normalized."""
+    from app.research.evidence import _verify_and_clean_citations
+
+    # Source has smart apostrophe and em-dash
+    source_chunk = RankedChunk(
+        url="https://acme.com",
+        chunk="Acme’s enterprise platform—built for scale—is deployed worldwide.",
+        score=2.0,
+    )
+    # LLM outputs standard ASCII apostrophe and standard hyphen
+    raw_citations = [
+        {
+            "claim": "Acme is built for scale.",
+            "quote": "Acme's enterprise platform-built for scale-is deployed worldwide.",
+            "source_url": "https://acme.com",
+            "relevance_score": 0.95,
+        }
+    ]
+
+    verified = _verify_and_clean_citations(raw_citations, [source_chunk])
+    assert len(verified) == 1
+    assert verified[0].claim == "Acme is built for scale."
+
+
+@pytest.mark.asyncio
+async def test_synthesize_evidence_single_turn_repair_retry_succeeds():
+    """If the initial LLM response fails validation, a single repair attempt is made and can succeed."""
+    mock_chunks = [
+        RankedChunk(
+            url="https://acme.com",
+            chunk=(
+                "Acme Corporation delivers enterprise-grade cloud automation and developer platforms. "
+                "The system provides continuous integration, automated deployment workflows, security monitoring, "
+                "and multi-cloud management for engineering teams across hundreds of organizations worldwide. "
+                "Our software speeds up production release cycles and enhances code reliability."
+            ),
+            score=3.0,
+        )
+    ]
+    # First response: malformed JSON (truncated or invalid)
+    bad_resp = LLMResponse(
+        request_id="repair_req_initial",
+        content="This is not valid json at all: {broken...",
+        finish_reason="stop",
+        prompt_tokens=100,
+        completion_tokens=20,
+        total_tokens=120,
+        latency_ms=100.0,
+    )
+    # Second response (repair retry): valid JSON matching schema
+    good_payload = {
+        "summary": "Acme Corporation delivers enterprise cloud automation and developer platforms.",
+        "citations": [
+            {
+                "claim": "Acme delivers cloud automation",
+                "quote": "Acme Corporation delivers enterprise-grade cloud automation and developer platforms.",
+                "source_url": "https://acme.com",
+                "relevance_score": 0.98,
+                "criterion": None,
+            }
+        ],
+        "is_insufficient_evidence": False,
+        "insufficient_reasons": [],
+    }
+    good_resp = LLMResponse(
+        request_id="repair_req_repair",
+        content=json.dumps(good_payload),
+        finish_reason="stop",
+        prompt_tokens=150,
+        completion_tokens=60,
+        total_tokens=210,
+        latency_ms=120.0,
+    )
+
+    with patch(
+        "app.research.evidence.call_llm", side_effect=[bad_resp, good_resp]
+    ) as mock_call_llm:
+        summary, citations, is_insufficient, reasons = await synthesize_evidence(
+            company_name="Acme",
+            domain="acme.com",
+            ranked_chunks=mock_chunks,
+            request_id="repair_req",
+        )
+
+    assert mock_call_llm.call_count == 2
+    assert is_insufficient is False
+    assert len(citations) == 1
+    assert "enterprise cloud automation" in summary

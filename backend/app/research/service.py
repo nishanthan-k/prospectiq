@@ -10,7 +10,7 @@ from app.research.extractor import extract_page
 from app.research.models import ExtractedPage, ResearchRequest, ResearchResponse, SearchResult
 from app.research.ranker import rank_chunks
 from app.research.search import search_company
-from app.research.security import is_same_domain_or_subdomain, validate_url
+from app.research.security import is_same_domain_or_subdomain, validate_url_async
 
 MAX_SOURCES = 3
 
@@ -35,37 +35,48 @@ GENERIC_COMPANY_SUFFIXES = {
 
 def is_search_result_relevant(sr: SearchResult, company_name: str) -> bool:
     """
-    Check if a search result's title, snippet, or URL mentions the company's brand name or acronym.
-    Prevents scraping unrelated companies returned by search engine fuzzy autocorrect
-    without breaking companies with shorter or acronym domains (e.g. IBM, 3M, TCS).
+    Check if a search result relates to the target company using word boundaries,
+    supporting short/acronym names (3M, HP, GE) and preventing substring false matches.
     """
-    # 1. Distinctive brand tokens
-    brand_tokens = [
-        t for t in re.findall(r"\w+", company_name.lower())
-        if len(t) >= 3 and t not in GENERIC_COMPANY_SUFFIXES
-    ]
-    if not brand_tokens:
-        brand_tokens = [t for t in re.findall(r"\w+", company_name.lower()) if len(t) >= 3]
+    clean_name = re.sub(r"[^\w\s]", " ", company_name.lower())
+    tokens = [t for t in clean_name.split() if len(t) >= 2 and t not in GENERIC_COMPANY_SUFFIXES]
+    if not tokens:
+        tokens = [t for t in clean_name.split() if len(t) >= 1]
 
-    content_to_check = f"{sr.title} {sr.snippet} {sr.url}".lower()
+    content_to_check = f"{sr.title} {sr.snippet}".lower()
+    url_lower = sr.url.lower()
 
-    # Check if any distinctive brand token appears in title, snippet, or URL
-    if any(tok in content_to_check for tok in brand_tokens):
-        return True
+    # 1. Check exact word boundaries in title/snippet
+    for tok in tokens:
+        if re.search(rf"\b{re.escape(tok)}\b", content_to_check):
+            return True
 
-    # 2. Acronyms (e.g. TCS from Tata Consultancy Services, IBM from International Business Machines)
+    # 2. Check domain hostname
+    parsed = urllib.parse.urlsplit(url_lower)
+    hostname = (parsed.hostname or "").replace("www.", "")
+    host_labels = [lbl for lbl in re.split(r"[.\-_]", hostname) if lbl]
+    for tok in tokens:
+        # Check exact label match (e.g. "cat" in ["cat", "com"], "hp" in ["hp", "com"])
+        if tok in host_labels:
+            return True
+        # Check if domain label starts with token (e.g. "ncspartners" starts with "ncs")
+        if len(tok) >= 3 and any(lbl.startswith(tok) for lbl in host_labels):
+            return True
+
+    # 3. Acronym checks for multi-word company names
     all_words = [w for w in re.findall(r"\w+", company_name) if len(w) > 0]
     if len(all_words) >= 2:
         full_acronym = "".join(w[0] for w in all_words).lower()
-        if len(full_acronym) >= 2 and re.search(rf"\b{re.escape(full_acronym)}\b", content_to_check):
+        if len(full_acronym) >= 2 and re.search(
+            rf"\b{re.escape(full_acronym)}\b", content_to_check
+        ):
             return True
-        non_legal_words = [
-            w for w in all_words
-            if w.lower() not in {"private", "limited", "ltd", "pvt", "corp", "inc", "co"}
-        ]
+        non_legal_words = [w for w in all_words if w.lower() not in GENERIC_COMPANY_SUFFIXES]
         if len(non_legal_words) >= 2:
             short_acronym = "".join(w[0] for w in non_legal_words).lower()
-            if len(short_acronym) >= 2 and re.search(rf"\b{re.escape(short_acronym)}\b", content_to_check):
+            if len(short_acronym) >= 2 and re.search(
+                rf"\b{re.escape(short_acronym)}\b", content_to_check
+            ):
                 return True
 
     return False
@@ -108,6 +119,8 @@ async def conduct_research(request: ResearchRequest) -> ResearchResponse:
 
     extracted_pages: list[ExtractedPage] = []
 
+    domain_ssrf_rejected = False
+
     # Case A: User provided target domain -> Domain-First Extraction
     if request.domain:
         clean_host = _extract_clean_host(request.domain)
@@ -117,8 +130,23 @@ async def conduct_research(request: ResearchRequest) -> ResearchResponse:
             else f"https://{request.domain}"
         )
 
-        is_safe, reason = validate_url(primary_url, allow_dns_resolution=True)
-        if is_safe:
+        is_safe, reason = await validate_url_async(primary_url, allow_dns_resolution=True)
+        if not is_safe:
+            reason_lower = (reason or "").lower()
+            if any(
+                k in reason_lower
+                for k in ["private", "disallowed", "loopback", "internal", "local", "credentials"]
+            ):
+                log.warning(
+                    f"[{request_id}] Provided domain '{primary_url}' failed SSRF validation: {reason}"
+                )
+                domain_ssrf_rejected = True
+            else:
+                log.info(
+                    f"[{request_id}] Provided domain '{primary_url}' resolution failed: {reason}. "
+                    f"Falling back to search."
+                )
+        else:
             primary_page = await extract_page(primary_url)
             if primary_page:
                 extracted_pages.append(primary_page)
@@ -127,7 +155,8 @@ async def conduct_research(request: ResearchRequest) -> ResearchResponse:
                 if primary_page.internal_links:
                     needed = MAX_SOURCES - len(extracted_pages)
                     internal_candidates = [
-                        link for link in primary_page.internal_links
+                        link
+                        for link in primary_page.internal_links
                         if is_same_domain_or_subdomain(link, clean_host) and link != primary_url
                     ][:needed]
 
@@ -139,14 +168,20 @@ async def conduct_research(request: ResearchRequest) -> ResearchResponse:
                         for res in sub_results:
                             if isinstance(res, ExtractedPage):
                                 extracted_pages.append(res)
-        else:
-            log.warning(f"[{request_id}] Provided domain '{primary_url}' failed SSRF validation: {reason}")
-    else:
-        # Case B: Domain was omitted -> Search for company domain
+
+    # Case B: Domain was omitted OR domain extraction yielded no usable pages -> Fallback to search
+    if not extracted_pages and not domain_ssrf_rejected:
+        if request.domain:
+            log.info(
+                f"[{request_id}] Provided domain '{request.domain}' yielded no usable pages. "
+                f"Falling back to public search for '{request.company_name}'."
+            )
         search_query = request.company_name
         search_results = await search_company(search_query, max_results=5)
         if not search_results:
-            search_results = await search_company(f"{request.company_name} official website", max_results=5)
+            search_results = await search_company(
+                f"{request.company_name} official website", max_results=5
+            )
 
         urls_to_scrape: list[str] = []
         for sr in search_results:
@@ -157,7 +192,7 @@ async def conduct_research(request: ResearchRequest) -> ResearchResponse:
                 )
                 continue
 
-            is_safe, _ = validate_url(sr.url, allow_dns_resolution=True)
+            is_safe, _ = await validate_url_async(sr.url, allow_dns_resolution=True)
             if is_safe and sr.url not in urls_to_scrape:
                 urls_to_scrape.append(sr.url)
             if len(urls_to_scrape) >= MAX_SOURCES:
@@ -220,4 +255,3 @@ async def conduct_research(request: ResearchRequest) -> ResearchResponse:
         sources_scraped=sources_scraped,
         latency_ms=latency_ms,
     )
-

@@ -36,7 +36,9 @@ def _clean_json_string(text: str) -> str:
     cleaned = re.sub(r"<thought>.*?</thought>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
 
     # 2. Extract from markdown code fence if present
-    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    fence_match = re.search(
+        r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, flags=re.DOTALL | re.IGNORECASE
+    )
     if fence_match:
         cleaned = fence_match.group(1)
     else:
@@ -112,7 +114,7 @@ def _safe_parse_json(text: str) -> Optional[dict]:
         base_candidate + '"}]}',
         base_candidate + '"]}',
         base_candidate + '"]}}',
-        base_candidate + '}',
+        base_candidate + "}",
         base_candidate + '"}',
         base_candidate + '"]',
     ]
@@ -128,8 +130,16 @@ def _safe_parse_json(text: str) -> Optional[dict]:
 
 
 def _normalize_text(text: str) -> str:
-    """Normalize whitespace and lowercase for reliable quote matching."""
-    return " ".join(text.lower().split())
+    """Normalize whitespace, unicode quotes, dashes, and punctuation for resilient quote matching."""
+    t = text.lower()
+    # Normalize unicode quotation marks & apostrophes
+    t = re.sub(r"[\u2018\u2019\u201a\u201b\u0027]", "'", t)
+    t = re.sub(r"[\u201c\u201d\u201e\u201f\u0022]", '"', t)
+    # Normalize hyphens and dashes (en-dash, em-dash, figure dash, etc.)
+    t = re.sub(r"[\u2010\u2011\u2012\u2013\u2014\u2015]", "-", t)
+    # Normalize non-breaking spaces and whitespace
+    t = re.sub(r"\s+", " ", t)
+    return t.strip()
 
 
 def _verify_and_clean_citations(
@@ -171,7 +181,9 @@ def _verify_and_clean_citations(
 
         # 2. Source URL must be one of the retrieved sources
         if source_url not in normalized_content_by_url:
-            log.warning(f"Rejecting citation: source_url '{source_url}' was not in retrieved sources.")
+            log.warning(
+                f"Rejecting citation: source_url '{source_url}' was not in retrieved sources."
+            )
             continue
 
         # 3. Quote must exist in THAT specific source URL only (no cross-source matching)
@@ -241,10 +253,10 @@ async def synthesize_evidence(
             ["Total retrieved text is below the minimum threshold (40 words) for qualification."],
         )
 
-    # Build context for LLM synthesis (capped for token efficiency and TPM compliance)
+    # Build context for LLM synthesis (top 5 chunks x 800 chars for rich business context)
     context_blocks = []
-    for idx, rc in enumerate(ranked_chunks[:3], 1):
-        clean_chunk = rc.chunk[:400].strip()
+    for idx, rc in enumerate(ranked_chunks[:5], 1):
+        clean_chunk = rc.chunk[:800].strip()
         context_blocks.append(f"--- Source [{idx}]: {rc.url} ---\n{clean_chunk}")
     joined_sources = "\n\n".join(context_blocks)
 
@@ -255,13 +267,11 @@ async def synthesize_evidence(
     )
 
     existing_context_str = (
-        f"\nExisting Notes / Context:\n{existing_summary}\n"
-        if existing_summary
-        else ""
+        f"\nExisting Notes / Context:\n{existing_summary}\n" if existing_summary else ""
     )
 
     prompt = f"""Target Company: {company_name}
-Target Domain: {domain or 'Not provided'}{existing_context_str}
+Target Domain: {domain or "Not provided"}{existing_context_str}
 
 Research Scope:
 {criteria_text}
@@ -317,32 +327,81 @@ Note on Evidence Insufficiency: If the sources do NOT confirm what the company d
             [f"LLM synthesis failure: {exc}"],
         )
 
-    # Parse JSON from model output
+    # Parse and validate JSON from model output
+    validated_output: Optional[LLMResearchOutput] = None
+    validation_err: Optional[str] = None
+
     data = _safe_parse_json(raw_text)
     if not data or not isinstance(data, dict):
-        log.warning(
-            f"[{request_id}] Failed to parse structured JSON from LLM response (len={len(raw_text)}). "
-            f"Raw output snippet: {raw_text[:200]!r}"
-        )
-        return (
-            f"Unable to synthesize research for '{company_name}' due to malformed model output.",
-            [],
-            True,
-            ["LLM response was not valid structured JSON."],
-        )
+        validation_err = "LLM response was not valid structured JSON."
+    else:
+        try:
+            validated_output = LLMResearchOutput.model_validate(data)
+        except ValidationError as err:
+            validation_err = f"LLM response was not valid structured JSON: {err}"
 
-    # Validate against strict Pydantic schema
-    try:
-        validated_output = LLMResearchOutput.model_validate(data)
-    except ValidationError as err:
+    # Single-turn repair retry if initial parsing or schema validation failed
+    if validation_err is not None:
         log.warning(
-            f"[{request_id}] LLM response failed structured schema validation: {err}"
+            f"[{request_id}] Initial LLM synthesis output failed validation ({validation_err}). "
+            f"Attempting single-turn repair retry."
         )
+        repair_prompt = f"""Target Company: {company_name}
+Target Domain: {domain or "Not provided"}
+
+Your previous response failed structured validation:
+Error details: {validation_err}
+
+Previous output:
+{raw_text[:1200]}
+
+Repair the output and return ONLY a valid JSON object matching this schema:
+{{
+  "summary": "2-3 sentences summarizing what the company does, their primary products or offerings, and their business model.",
+  "citations": [
+    {{
+      "claim": "Specific fact about the company",
+      "quote": "Verbatim quote from the text supporting this fact",
+      "source_url": "Exact URL from Source headers",
+      "relevance_score": 0.95,
+      "criterion": null
+    }}
+  ],
+  "is_insufficient_evidence": false,
+  "insufficient_reasons": []
+}}"""
+        try:
+            repair_req = LLMRequest(
+                prompt=repair_prompt,
+                system_prompt=SYNTHESIS_SYSTEM_PROMPT,
+                model=settings.fast_model,
+                temperature=0.1,
+                max_tokens=1500,
+                response_format={"type": "json_object"},
+                request_id=f"{request_id}_repair",
+            )
+            repair_resp = await call_llm(repair_req)
+            repair_text = (
+                repair_resp.content.strip() if isinstance(repair_resp, LLMResponse) else ""
+            )
+            repair_data = _safe_parse_json(repair_text)
+            if repair_data and isinstance(repair_data, dict):
+                try:
+                    validated_output = LLMResearchOutput.model_validate(repair_data)
+                    validation_err = None
+                    log.info(f"[{request_id}] Single-turn repair retry succeeded.")
+                except ValidationError:
+                    pass
+        except Exception as retry_exc:
+            log.warning(f"[{request_id}] Single-turn repair retry call failed: {retry_exc}")
+
+    if validated_output is None:
+        log.warning(f"[{request_id}] LLM response failed validation after retry: {validation_err}")
         return (
             f"Unable to synthesize research for '{company_name}' due to malformed model output.",
             [],
             True,
-            [f"LLM response was not valid structured JSON: {err}"],
+            [validation_err or "LLM response was not valid structured JSON."],
         )
 
     # State 4: Successful evidence-backed synthesis
@@ -364,6 +423,8 @@ Note on Evidence Insufficiency: If the sources do NOT confirm what the company d
     # If no valid citations could be verified and evidence was marked sufficient, flag that
     if not citations and not is_insufficient:
         is_insufficient = True
-        insufficient_reasons.append("No verifiable citations could be grounded in the retrieved sources.")
+        insufficient_reasons.append(
+            "No verifiable citations could be grounded in the retrieved sources."
+        )
 
     return summary, citations, is_insufficient, insufficient_reasons

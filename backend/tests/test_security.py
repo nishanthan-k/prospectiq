@@ -1,6 +1,8 @@
 import socket
 from unittest.mock import patch
 
+import pytest
+
 from app.research.security import is_same_domain_or_subdomain, validate_url
 
 
@@ -82,14 +84,22 @@ def test_validate_url_dns_resolution_detects_private_ip():
         (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 0)),
     ]
     with patch("socket.getaddrinfo", return_value=mock_addrinfo):
-        is_valid, reason = validate_url("https://malicious-rebinding.example.com", allow_dns_resolution=True)
+        is_valid, reason = validate_url(
+            "https://malicious-rebinding.example.com", allow_dns_resolution=True
+        )
         assert is_valid is False
         assert "resolved to disallowed IP" in reason
 
 
 def test_validate_url_dns_resolution_passes_public_ip():
     mock_addrinfo = [
-        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 0)),  # example.com
+        (
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            socket.IPPROTO_TCP,
+            "",
+            ("93.184.216.34", 0),
+        ),  # example.com
     ]
     with patch("socket.getaddrinfo", return_value=mock_addrinfo):
         is_valid, reason = validate_url("https://example.com", allow_dns_resolution=True)
@@ -113,5 +123,29 @@ def test_is_same_domain_or_subdomain_rejects_hostname_substring_attacks():
     """Attackers registering example.com.attacker.com must NOT match example.com."""
     assert is_same_domain_or_subdomain("https://stripe.com.attacker.com", "stripe.com") is False
     assert is_same_domain_or_subdomain("http://fakestripe.com", "stripe.com") is False
-    assert is_same_domain_or_subdomain("https://ncspartners.com.evil.co", "ncspartners.com") is False
+    assert (
+        is_same_domain_or_subdomain("https://ncspartners.com.evil.co", "ncspartners.com") is False
+    )
     assert is_same_domain_or_subdomain("https://not-ncspartners.com", "ncspartners.com") is False
+
+
+@pytest.mark.asyncio
+async def test_validate_url_async_non_blocking_dns():
+    """validate_url_async runs DNS resolution in background thread without blocking event loop."""
+    from app.research.security import validate_url_async
+
+    mock_addrinfo_public = [
+        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 0)),
+    ]
+    with patch("socket.getaddrinfo", return_value=mock_addrinfo_public):
+        is_valid, reason = await validate_url_async("https://example.com")
+        assert is_valid is True
+        assert reason is None
+
+    mock_addrinfo_private = [
+        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("10.0.0.1", 0)),
+    ]
+    with patch("socket.getaddrinfo", return_value=mock_addrinfo_private):
+        is_valid, reason = await validate_url_async("https://rebinding.example.com")
+        assert is_valid is False
+        assert "resolved to disallowed IP" in reason

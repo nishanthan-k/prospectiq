@@ -17,4 +17,3 @@ __all__ = [
     "close_groq_client",
     "get_groq_client",
 ]
-
