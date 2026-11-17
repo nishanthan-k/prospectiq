@@ -43,6 +43,40 @@ def test_is_search_result_relevant():
     )
     assert is_search_result_relevant(sr_tcs, "Tata Consultancy Services") is True
 
+    # 5. Supports 2-character short brand names (3M, HP, GE)
+    sr_3m = SearchResult(
+        title="3M Science Applied to Life",
+        url="https://www.3m.com/",
+        snippet="3M applies science and innovation to make a real impact.",
+        source="duckduckgo",
+    )
+    assert is_search_result_relevant(sr_3m, "3M") is True
+
+    sr_hp = SearchResult(
+        title="Official HP Laptop and Printer Store",
+        url="https://hp.com/us-en/shop",
+        snippet="Explore innovative laptops, printers, and tech accessories.",
+        source="bing",
+    )
+    assert is_search_result_relevant(sr_hp, "HP") is True
+
+    # 6. Prevents false positive substring matches using word boundaries
+    sr_cat_false = SearchResult(
+        title="Enterprise Application Education",
+        url="https://education.org/",
+        snippet="Specialized communication certificates for software engineers.",
+        source="duckduckgo",
+    )
+    assert is_search_result_relevant(sr_cat_false, "Cat") is False
+
+    sr_cat_true = SearchResult(
+        title="Cat Construction Equipment",
+        url="https://cat.com/",
+        snippet="Heavy machinery and power solutions from Caterpillar.",
+        source="duckduckgo",
+    )
+    assert is_search_result_relevant(sr_cat_true, "Cat") is True
+
 
 def test_extract_clean_host():
     assert _extract_clean_host("https://www.ncspartners.com/in") == "ncspartners.com"
@@ -66,7 +100,10 @@ async def test_conduct_research_with_domain_does_not_scrape_third_party():
         chunks=[
             "NCS Partners provides comprehensive supply chain consulting and enterprise solutions for businesses globally."
         ],
-        internal_links=["https://www.ncspartners.com/in/about", "https://www.ncspartners.com/in/services"],
+        internal_links=[
+            "https://www.ncspartners.com/in/about",
+            "https://www.ncspartners.com/in/services",
+        ],
     )
 
     about_page = ExtractedPage(
@@ -84,7 +121,7 @@ async def test_conduct_research_with_domain_does_not_scrape_third_party():
             return about_page
         return primary_page
 
-    with patch("app.research.service.validate_url", return_value=(True, None)):
+    with patch("app.research.service.validate_url_async", return_value=(True, None)):
         with patch("app.research.service.extract_page", side_effect=mock_extract):
             with patch("app.research.service.synthesize_evidence") as mock_synth:
                 mock_synth.return_value = (
@@ -122,3 +159,53 @@ async def test_conduct_research_rejects_ssrf_domain():
 
     assert mock_extract.call_count == 0
     assert len(resp.sources_scraped) == 0
+
+
+@pytest.mark.asyncio
+async def test_conduct_research_falls_back_to_search_when_domain_fails():
+    """If user provides a domain that fails to scrape (403, timeout, empty), conduct_research must fall back to search."""
+    req = ResearchRequest(
+        company_name="Acme Inc",
+        domain="broken-domain.com",
+    )
+
+    fallback_page = ExtractedPage(
+        url="https://acme-official.com",
+        title="Acme Official",
+        content="Acme delivers cloud infrastructure and developer automation tools.",
+        chunks=["Acme delivers cloud infrastructure and developer automation tools."],
+        internal_links=[],
+    )
+
+    async def mock_extract(url, client=None):
+        if "broken-domain" in url:
+            return None  # Simulated scrape failure (WAF/403/timeout)
+        return fallback_page
+
+    mock_search_results = [
+        SearchResult(
+            title="Acme Official Website",
+            url="https://acme-official.com",
+            snippet="Acme cloud infrastructure and developer automation.",
+            source="duckduckgo",
+        )
+    ]
+
+    with patch("app.research.service.extract_page", side_effect=mock_extract):
+        with patch(
+            "app.research.service.search_company", return_value=mock_search_results
+        ) as search_mock:
+            with patch("app.research.service.synthesize_evidence") as synth_mock:
+                synth_mock.return_value = (
+                    "Acme is a cloud infrastructure platform.",
+                    [],
+                    False,
+                    [],
+                )
+                resp = await conduct_research(req)
+
+    # Search was triggered as fallback
+    search_mock.assert_called_once_with("Acme Inc", max_results=5)
+    # Scraped the fallback search result
+    assert "https://acme-official.com" in resp.sources_scraped
+    assert resp.is_insufficient_evidence is False

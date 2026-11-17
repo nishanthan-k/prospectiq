@@ -39,6 +39,7 @@ Security Architecture & DNS Rebinding (TOCTOU) Assessment:
      filtering (`private-address` directive) enabled to strip RFC 1918 addresses from public DNS responses.
 """
 
+import asyncio
 import ipaddress
 import socket
 import urllib.parse
@@ -145,6 +146,16 @@ def validate_url(url: str, allow_dns_resolution: bool = True) -> tuple[bool, Opt
             return False, f"Error validating hostname '{hostname}': {exc}"
 
     return True, None
+
+
+async def validate_url_async(
+    url: str, allow_dns_resolution: bool = True
+) -> tuple[bool, Optional[str]]:
+    """
+    Asynchronously validate a URL against SSRF vulnerabilities.
+    Delegates blocking DNS resolution to a background thread to prevent stalling the asyncio event loop.
+    """
+    return await asyncio.to_thread(validate_url, url, allow_dns_resolution)
 
 
 def is_same_domain_or_subdomain(candidate_url_or_host: str, base_host: str) -> bool:

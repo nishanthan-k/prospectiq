@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 
 from app.core.logger import log
 from app.research.models import ExtractedPage
-from app.research.security import is_same_domain_or_subdomain, validate_url
+from app.research.security import is_same_domain_or_subdomain, validate_url, validate_url_async
 
 UNWANTED_TAGS = [
     "script",
@@ -79,12 +79,34 @@ def parse_html_to_page(url: str, html_content: str) -> ExtractedPage:
             path_lower = parsed_joined.path.lower()
             if any(
                 k in path_lower
-                for k in ["about", "service", "product", "solution", "overview", "company", "platform"]
+                for k in [
+                    "about",
+                    "service",
+                    "product",
+                    "solution",
+                    "overview",
+                    "company",
+                    "platform",
+                ]
             ):
                 clean_link = f"{parsed_joined.scheme}://{parsed_joined.netloc}{parsed_joined.path}"
                 is_safe, _ = validate_url(clean_link, allow_dns_resolution=False)
                 if is_safe and clean_link != url and clean_link not in internal_links:
                     internal_links.append(clean_link)
+
+    # Extract high-density meta descriptions (standard and Open Graph) before decomposing tags
+    meta_descriptions: list[str] = []
+    meta_desc = soup.find("meta", attrs={"name": re.compile(r"^description$", re.I)})
+    if meta_desc and meta_desc.get("content"):
+        c = _clean_text(str(meta_desc["content"]))
+        if len(c) >= 15:
+            meta_descriptions.append(c)
+
+    og_desc = soup.find("meta", attrs={"property": re.compile(r"^og:description$", re.I)})
+    if og_desc and og_desc.get("content"):
+        c = _clean_text(str(og_desc["content"]))
+        if len(c) >= 15 and c not in meta_descriptions:
+            meta_descriptions.append(c)
 
     # Remove unwanted tags
     for tag_name in UNWANTED_TAGS:
@@ -96,16 +118,36 @@ def parse_html_to_page(url: str, html_content: str) -> ExtractedPage:
         attrs = getattr(el, "attrs", None)
         if not isinstance(attrs, dict):
             continue
-        classes = " ".join(attrs.get("class", [])) if isinstance(attrs.get("class"), list) else str(attrs.get("class", ""))
+        classes = (
+            " ".join(attrs.get("class", []))
+            if isinstance(attrs.get("class"), list)
+            else str(attrs.get("class", ""))
+        )
         element_id = str(attrs.get("id", ""))
         classes_and_id = f"{classes} {element_id}".lower()
-        if any(b in classes_and_id for b in ["cookie-banner", "cookie-consent", "gdpr-banner", "privacy-banner", "cookie-notice", "cookie"]):
+        if any(
+            b in classes_and_id
+            for b in [
+                "cookie-banner",
+                "cookie-consent",
+                "gdpr-banner",
+                "privacy-banner",
+                "cookie-notice",
+                "cookie",
+            ]
+        ):
             el.decompose()
 
     # Extract text blocks from leaf-level content elements only
     # (Avoids duplicating text from outer <section>, <article>, or <div> wrappers)
     raw_blocks: list[str] = []
     seen_blocks: set[str] = set()
+
+    # Add meta descriptions first as high-signal summary context
+    for md in meta_descriptions:
+        seen_blocks.add(md.lower())
+        raw_blocks.append(md)
+
     leaf_tags = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote"}
     content_elements = soup.find_all(list(leaf_tags))
 
@@ -117,14 +159,14 @@ def parse_html_to_page(url: str, html_content: str) -> ExtractedPage:
 
             t = _clean_text(elem.get_text())
             t_lower = t.lower()
-            if len(t) >= 30 and t_lower not in seen_blocks:
+            if len(t) >= 15 and t_lower not in seen_blocks:
                 seen_blocks.add(t_lower)
                 raw_blocks.append(t)
     else:
         # Fallback to stripped strings if no structured tags found
         body = soup.find("body") or soup
         fallback_text = _clean_text(" ".join(body.stripped_strings))
-        if fallback_text and len(fallback_text) >= 30:
+        if fallback_text and len(fallback_text) >= 15:
             raw_blocks = [fallback_text]
 
     # Combine blocks and build chunks (chunks of ~300 to 600 chars)
@@ -179,7 +221,9 @@ async def extract_page(
 
         # Manual redirect loop to validate each hop against SSRF
         for _ in range(max_redirects + 1):
-            is_valid_hop, hop_reason = validate_url(current_url, allow_dns_resolution=True)
+            is_valid_hop, hop_reason = await validate_url_async(
+                current_url, allow_dns_resolution=True
+            )
             if not is_valid_hop:
                 log.warning(f"SSRF check rejected URL '{current_url}': {hop_reason}")
                 return None
@@ -197,7 +241,7 @@ async def extract_page(
                     log.warning(f"Failed to fetch {current_url}: HTTP {response.status_code}")
                     return None
 
-                content_type = response.headers.get("content-type", "")
+                content_type = response.headers.get("content-type", "").lower()
                 if "text/html" not in content_type and "application/xhtml" not in content_type:
                     log.info(f"Skipping non-HTML resource {current_url} ({content_type})")
                     return None

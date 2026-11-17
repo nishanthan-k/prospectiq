@@ -230,8 +230,7 @@ async def _execute_create(
     except (APITimeoutError, TimeoutError) as exc:
         latency_ms = (time.perf_counter() - start_time) * 1000.0
         log.error(
-            f"[{request_id}] LLM call timed out after {latency_ms:.0f}ms "
-            f"(limit={timeout_seconds}s)"
+            f"[{request_id}] LLM call timed out after {latency_ms:.0f}ms (limit={timeout_seconds}s)"
         )
         raise LLMTimeoutError(request_id, timeout_seconds) from exc
     except Exception as exc:
@@ -294,6 +293,7 @@ async def call_llm(
     )
 
     if req.stream:
+
         async def _event_stream() -> AsyncIterator[str]:
             finish_reason = "stop"
             prompt_tokens = 0

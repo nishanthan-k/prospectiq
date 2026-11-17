@@ -72,4 +72,3 @@ def test_rank_chunks_orders_and_limits_results():
     assert len(ranked) == 2
     assert ranked[0].url in ["https://example.com/product", "https://example.com/pricing"]
     assert ranked[0].score >= ranked[1].score
-

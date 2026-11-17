@@ -1,6 +1,6 @@
-import httpx
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 from app.research.extractor import extract_page, parse_html_to_page
@@ -52,7 +52,10 @@ def test_parse_html_to_page_prevents_nested_element_duplication():
 
     # Count occurrences: "Continuous Integration Platform" and the paragraph should appear exactly once
     assert page.content.count("Continuous Integration Platform") == 1
-    assert page.content.count("Automate build, test, and container deployments across hybrid clouds.") == 1
+    assert (
+        page.content.count("Automate build, test, and container deployments across hybrid clouds.")
+        == 1
+    )
 
 
 def test_parse_html_to_page_strips_cookie_and_consent_banners():
@@ -93,7 +96,10 @@ def test_parse_html_to_page_deduplicates_repeated_content():
     """
     page = parse_html_to_page("https://example.com", repeated_html)
 
-    assert page.content.count("Enterprise grade security with automated SOC2 compliance monitoring.") == 1
+    assert (
+        page.content.count("Enterprise grade security with automated SOC2 compliance monitoring.")
+        == 1
+    )
     assert "Multi-tenant infrastructure" in page.content
 
 
@@ -138,7 +144,9 @@ async def test_extract_page_handles_http_errors():
 @pytest.mark.asyncio
 async def test_extract_page_skips_non_html():
     transport = httpx.MockTransport(
-        lambda req: httpx.Response(200, headers={"content-type": "application/pdf"}, content=b"%PDF-1.4")
+        lambda req: httpx.Response(
+            200, headers={"content-type": "application/pdf"}, content=b"%PDF-1.4"
+        )
     )
     client = httpx.AsyncClient(transport=transport)
 
@@ -159,9 +167,12 @@ async def test_extract_page_rejects_ssrf_on_initial_url():
 @pytest.mark.asyncio
 async def test_extract_page_rejects_redirect_to_internal_address():
     """If a public URL redirects to a private/loopback address, extract_page must abort."""
+
     def handle_request(req):
         if "redirect" in str(req.url):
-            return httpx.Response(302, headers={"location": "http://127.0.0.1:8000/internal-metrics"})
+            return httpx.Response(
+                302, headers={"location": "http://127.0.0.1:8000/internal-metrics"}
+            )
         return httpx.Response(200, headers={"content-type": "text/html"}, text="<p>Internal</p>")
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handle_request))
@@ -176,7 +187,9 @@ async def test_extract_page_rejects_redirect_to_internal_address():
 @pytest.mark.asyncio
 async def test_extract_page_response_below_size_limit():
     """Responses smaller than max_bytes must download and parse successfully."""
-    html_bytes = b"<html><body><p>Acme Corp provides automated cloud infrastructure.</p></body></html>"
+    html_bytes = (
+        b"<html><body><p>Acme Corp provides automated cloud infrastructure.</p></body></html>"
+    )
     transport = httpx.MockTransport(
         lambda req: httpx.Response(200, headers={"content-type": "text/html"}, content=html_bytes)
     )
@@ -280,6 +293,7 @@ async def test_extract_page_empty_response():
 @pytest.mark.asyncio
 async def test_extract_page_valid_redirect_followed():
     """Valid redirects to public URLs must be followed and parsed."""
+
     def handle_request(req):
         if "redirect" in str(req.url):
             return httpx.Response(302, headers={"location": "https://public-site.com/destination"})
@@ -296,3 +310,46 @@ async def test_extract_page_valid_redirect_followed():
 
     assert page is not None
     assert page.title == "Destination Page"
+
+
+def test_parse_html_to_page_extracts_meta_descriptions():
+    """parse_html_to_page must extract meta description and og:description as high-density context."""
+    html = """
+    <html>
+      <head>
+        <title>NCS Partners</title>
+        <meta name="description" content="NCS Partners is a leading global supply chain consulting firm.">
+        <meta property="og:description" content="Transforming enterprise supply chains with cutting-edge software.">
+      </head>
+      <body>
+        <h1>Welcome</h1>
+        <p>Enterprise solutions for modern global commerce operations.</p>
+      </body>
+    </html>
+    """
+    page = parse_html_to_page("https://ncspartners.com", html)
+    assert page.title == "NCS Partners"
+    assert "NCS Partners is a leading global supply chain consulting firm." in page.content
+    assert "Transforming enterprise supply chains with cutting-edge software." in page.content
+    assert any("NCS Partners is a leading global supply chain" in c for c in page.chunks)
+
+
+def test_parse_html_to_page_extracts_concise_leaf_tags():
+    """Leaf tags between 15 and 29 characters (slogans, pricing points) must be retained."""
+    html = """
+    <html>
+      <body>
+        <h1>Acme Cloud AI</h1>
+        <h2>Fast and reliable</h2>
+        <p>15 chars minimum</p>
+        <p>Tiny</p>
+      </body>
+    </html>
+    """
+    page = parse_html_to_page("https://acme.com", html)
+    # "Fast and reliable" is 17 chars (>= 15) -> preserved
+    assert "Fast and reliable" in page.content
+    # "15 chars minimum" is 16 chars (>= 15) -> preserved
+    assert "15 chars minimum" in page.content
+    # "Tiny" is 4 chars (< 15) -> discarded
+    assert "Tiny" not in page.content

@@ -1,6 +1,6 @@
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, StrictBool, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ResearchRequest(BaseModel):
@@ -77,14 +77,15 @@ class LLMCitationPayload(BaseModel):
 
 
 class LLMResearchOutput(BaseModel):
-    """Strict schema for validating structured JSON produced by synthesis LLM."""
+    """Schema for validating structured JSON produced by synthesis LLM."""
 
     summary: str = Field(..., description="Executive summary of the company")
     citations: list[LLMCitationPayload] = Field(
         ..., description="List of structured citations supporting the summary"
     )
-    is_insufficient_evidence: StrictBool = Field(
-        ..., description="Strict boolean indicating if evidence was insufficient"
+    is_insufficient_evidence: bool = Field(
+        default=False,
+        description="Boolean indicating if evidence was insufficient",
     )
     insufficient_reasons: list[str] = Field(
         default_factory=list,

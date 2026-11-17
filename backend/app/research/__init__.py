@@ -17,4 +17,3 @@ __all__ = [
     "SearchResult",
     "conduct_research",
 ]
-
