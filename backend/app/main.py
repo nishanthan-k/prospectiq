@@ -4,6 +4,7 @@ import uvicorn
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app.agent import AgentRunRequest, AgentRunResponse, run_sales_agent
 from app.core.config import get_settings
 from app.core.logger import log
 from app.llm import (
@@ -54,6 +55,11 @@ async def chat(request: LLMRequest):
 @api_router.post("/research", response_model=ResearchResponse)
 async def research(request: ResearchRequest):
     return await conduct_research(request)
+
+
+@api_router.post("/agent/run", response_model=AgentRunResponse)
+async def agent_run(request: AgentRunRequest):
+    return await run_sales_agent(request)
 
 
 app.include_router(api_router)

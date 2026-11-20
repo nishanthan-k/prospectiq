@@ -14,7 +14,7 @@ from groq import (
     InternalServerError,
     RateLimitError,
 )
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from tenacity import (
     AsyncRetrying,
     RetryCallState,
@@ -24,16 +24,32 @@ from tenacity import (
 )
 
 from app.core.config import get_settings
+from app.core.json_utils import _safe_parse_json
 from app.core.logger import log
 from app.llm.prompts import SALES_ASSISTANT_SYSTEM_PROMPT
 
 settings = get_settings()
 
 
+class ToolCallPayload(BaseModel):
+    """Structured tool invocation requested by the LLM."""
+
+    id: str = Field(..., description="Unique tool call invocation ID")
+    name: str = Field(..., description="Target tool name to execute")
+    arguments: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Parsed JSON arguments for the tool",
+    )
+
+
 class LLMRequest(BaseModel):
     """Unified LLM request payload with defaults and field validations."""
 
-    prompt: str = Field(..., min_length=1, description="Prompt text for the model")
+    prompt: Optional[str] = Field(default=None, description="Prompt text for the model")
+    messages: Optional[list[dict[str, Any]]] = Field(
+        default=None,
+        description="Optional multi-turn conversation messages list",
+    )
     system_prompt: Optional[str] = Field(
         default=SALES_ASSISTANT_SYSTEM_PROMPT,
         description="System prompt guiding assistant behavior",
@@ -84,26 +100,48 @@ class LLMRequest(BaseModel):
         default=None,
         description="Optional response format specification, e.g. {'type': 'json_object'}",
     )
+    tools: Optional[list[dict[str, Any]]] = Field(
+        default=None,
+        description="Optional list of tool definitions in OpenAI/Groq function-calling format",
+    )
+    tool_choice: Optional[Union[str, dict[str, Any]]] = Field(
+        default=None,
+        description="Optional tool choice directive ('auto', 'none', 'required', or specific tool object)",
+    )
 
     @field_validator("prompt")
     @classmethod
-    def validate_prompt_not_blank(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("Prompt cannot be empty or only whitespace")
-        return v.strip()
+    def validate_prompt_not_blank(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            if not v.strip():
+                raise ValueError("Prompt cannot be empty or only whitespace")
+            return v.strip()
+        return v
+
+    @model_validator(mode="after")
+    def validate_prompt_or_messages(self) -> "LLMRequest":
+        if self.messages is None and self.prompt is None:
+            raise ValueError("Either 'prompt' or 'messages' must be provided")
+        if self.messages is not None and len(self.messages) == 0:
+            raise ValueError("'messages' cannot be empty when provided")
+        return self
 
 
 class LLMResponse(BaseModel):
     """Structured LLM response output with correlation ID and latency."""
 
     request_id: str
-    content: str
-    finish_reason: str
+    content: Optional[str] = ""
+    finish_reason: str = "stop"
     is_truncated: bool = False
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
     latency_ms: float = 0.0
+    tool_calls: list[ToolCallPayload] = Field(
+        default_factory=list,
+        description="Structured tool calls requested by the model",
+    )
 
 
 class LLMTimeoutError(Exception):
@@ -164,7 +202,7 @@ async def close_groq_client() -> None:
 def _prepare_request(
     params: Union[LLMRequest, str, dict],
     client: Optional[AsyncGroq],
-) -> tuple[LLMRequest, str, float, int, AsyncGroq, list[dict[str, str]]]:
+) -> tuple[LLMRequest, str, float, int, AsyncGroq, list[dict[str, Any]]]:
     if isinstance(params, str):
         req = LLMRequest(prompt=params)
     elif isinstance(params, dict):
@@ -179,10 +217,14 @@ def _prepare_request(
     max_retries = req.max_retries if req.max_retries is not None else settings.llm_max_retries
     groq_client = client or get_groq_client()
 
-    messages: list[dict[str, str]] = []
-    if req.system_prompt:
-        messages.append({"role": "system", "content": req.system_prompt})
-    messages.append({"role": "user", "content": req.prompt})
+    if req.messages is not None:
+        messages: list[dict[str, Any]] = list(req.messages)
+    else:
+        messages = []
+        if req.system_prompt:
+            messages.append({"role": "system", "content": req.system_prompt})
+        if req.prompt:
+            messages.append({"role": "user", "content": req.prompt})
 
     return req, request_id, timeout_seconds, max_retries, groq_client, messages
 
@@ -190,7 +232,7 @@ def _prepare_request(
 async def _execute_create(
     groq_client: AsyncGroq,
     req: LLMRequest,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     timeout_seconds: float,
     max_retries: int,
     request_id: str,
@@ -222,6 +264,10 @@ async def _execute_create(
                 }
                 if req.response_format:
                     kwargs["response_format"] = req.response_format
+                if req.tools:
+                    kwargs["tools"] = req.tools
+                if req.tool_choice:
+                    kwargs["tool_choice"] = req.tool_choice
 
                 return await asyncio.wait_for(
                     groq_client.chat.completions.create(**kwargs),
@@ -372,10 +418,34 @@ async def call_llm(
     completion_tokens = usage.completion_tokens if usage else 0
     total_tokens = usage.total_tokens if usage else 0
 
+    # Extract and parse tool calls safely
+    parsed_tool_calls: list[ToolCallPayload] = []
+    raw_tool_calls = getattr(choice.message, "tool_calls", None)
+    if raw_tool_calls:
+        for rtc in raw_tool_calls:
+            tc_id = getattr(rtc, "id", "") or str(uuid.uuid4())
+            fn = getattr(rtc, "function", None)
+            fn_name = getattr(fn, "name", "") if fn else ""
+            raw_args = getattr(fn, "arguments", "{}") if fn else "{}"
+
+            # Resilient argument parsing using _safe_parse_json
+            parsed_args = _safe_parse_json(raw_args) if isinstance(raw_args, str) else raw_args
+            if not isinstance(parsed_args, dict):
+                parsed_args = {}
+
+            parsed_tool_calls.append(
+                ToolCallPayload(
+                    id=tc_id,
+                    name=fn_name,
+                    arguments=parsed_args,
+                )
+            )
+
     log.info(
         f"[{request_id}] LLM call completed in {latency_ms:.0f}ms: "
         f"tokens={total_tokens} (prompt={prompt_tokens}, completion={completion_tokens}), "
-        f"finish_reason={finish_reason}, is_truncated={is_truncated}"
+        f"finish_reason={finish_reason}, is_truncated={is_truncated}, "
+        f"tool_calls={len(parsed_tool_calls)}"
     )
 
     return LLMResponse(
@@ -387,4 +457,5 @@ async def call_llm(
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
         latency_ms=round(latency_ms, 2),
+        tool_calls=parsed_tool_calls,
     )
