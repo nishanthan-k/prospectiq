@@ -5,6 +5,8 @@ from app.llm.client import (
     LLMResponse,
     LLMTimeoutError,
     ToolCallPayload,
+    _extract_rate_limit_wait,
+    _smart_wait,
     call_llm,
     close_groq_client,
     get_groq_client,
@@ -18,4 +20,6 @@ __all__ = [
     "call_llm",
     "close_groq_client",
     "get_groq_client",
+    "_extract_rate_limit_wait",
+    "_smart_wait",
 ]
