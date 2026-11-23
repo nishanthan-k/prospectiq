@@ -233,3 +233,234 @@ async def test_agent_api_allowed_tools_filtering(client: AsyncClient):
     # Tools passed to LLM must only contain search_company
     tool_names = [t["function"]["name"] for t in req_sent.tools]
     assert tool_names == ["search_company"]
+
+
+# --- Investigate API Tests ---
+
+
+@pytest.mark.asyncio
+async def test_agent_investigate_api_validation(client: AsyncClient):
+    """Empty company_name returns 422 Unprocessable Entity."""
+    response = await client.post("/api/agent/investigate", json={"company_name": "   "})
+    assert response.status_code == 422
+    errors = response.json()["detail"]
+    assert any("Company name cannot be empty" in err["msg"] for err in errors)
+
+
+@pytest.mark.asyncio
+async def test_agent_investigate_api_success(client: AsyncClient):
+    """Investigate endpoint conducts search and returns structured company profile."""
+    step1_resp = LLMResponse(
+        request_id="res_inv1",
+        content="",
+        tool_calls=[
+            ToolCallPayload(
+                id="call_search_inv",
+                name="search_company",
+                arguments={"query": "Retool low code developer internal tools"},
+            )
+        ],
+        finish_reason="tool_calls",
+        prompt_tokens=50,
+        completion_tokens=20,
+        total_tokens=70,
+    )
+
+    investigate_json = json.dumps(
+        {
+            "summary": "Retool is a low-code enterprise development platform for building internal software.",
+            "primary_offerings": ["Retool Apps", "Retool Workflows", "Retool Database"],
+            "business_model": "B2B SaaS Subscription",
+            "target_audience": "Software engineering teams and operations leaders",
+        }
+    )
+
+    step2_resp = LLMResponse(
+        request_id="res_inv2",
+        content=investigate_json,
+        finish_reason="stop",
+        prompt_tokens=150,
+        completion_tokens=50,
+        total_tokens=200,
+    )
+
+    mock_search = [
+        SearchResult(
+            title="Retool | Low Code Internal Tools",
+            url="https://retool.com",
+            snippet="Build apps and workflows connected to any database or API.",
+            source="bing",
+        )
+    ]
+
+    with (
+        patch("app.agent.runner.call_llm", side_effect=[step1_resp, step2_resp]),
+        patch(
+            "app.agent.tools.definitions.search_company", new=AsyncMock(return_value=mock_search)
+        ),
+    ):
+        response = await client.post(
+            "/api/agent/investigate",
+            json={
+                "company_name": "Retool",
+                "domain": "retool.com",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["request_id"].startswith("inv_")
+    assert data["company_name"] == "Retool"
+    assert data["domain"] == "retool.com"
+    assert "low-code enterprise development" in data["summary"]
+    assert "Retool Apps" in data["primary_offerings"]
+    assert "B2B SaaS" in data["business_model"]
+    assert "engineering" in data["target_audience"].lower()
+    assert data["steps_taken"] == 2
+    assert len(data["tool_calls"]) == 1
+    assert data["tool_calls"][0]["tool_name"] == "search_company"
+
+
+# --- Qualify API Tests ---
+
+
+@pytest.mark.asyncio
+async def test_agent_qualify_api_validation(client: AsyncClient):
+    """Empty company_name returns 422 Unprocessable Entity."""
+    response = await client.post("/api/agent/qualify", json={"company_name": "  "})
+    assert response.status_code == 422
+    errors = response.json()["detail"]
+    assert any("Company name cannot be empty" in err["msg"] for err in errors)
+
+
+@pytest.mark.asyncio
+async def test_agent_qualify_api_success(client: AsyncClient):
+    """Qualify endpoint evaluates company against ICP criteria and returns business case."""
+    # Step 1: LLM executes evaluate_lead_fit with company summary
+    step1_resp = LLMResponse(
+        request_id="res_qlf1",
+        content="",
+        tool_calls=[
+            ToolCallPayload(
+                id="call_lead_fit",
+                name="evaluate_lead_fit",
+                arguments={
+                    "company_name": "Datadog",
+                    "offerings_summary": "Cloud monitoring, observability platform for enterprise B2B SaaS architecture, developer APIs, and security compliance.",
+                },
+            )
+        ],
+        finish_reason="tool_calls",
+        prompt_tokens=80,
+        completion_tokens=30,
+        total_tokens=110,
+    )
+
+    # Step 2: Final response
+    step2_resp = LLMResponse(
+        request_id="res_qlf2",
+        content="Datadog strongly qualifies for our platform based on its B2B SaaS cloud architecture and enterprise compliance profile.",
+        finish_reason="stop",
+        prompt_tokens=150,
+        completion_tokens=40,
+        total_tokens=190,
+    )
+
+    with patch("app.agent.runner.call_llm", side_effect=[step1_resp, step2_resp]):
+        response = await client.post(
+            "/api/agent/qualify",
+            json={
+                "company_name": "Datadog",
+                "domain": "datadoghq.com",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["request_id"].startswith("qlf_")
+    assert data["company_name"] == "Datadog"
+    assert data["domain"] == "datadoghq.com"
+
+    qual = data["qualification"]
+    assert qual["is_fit"] is True
+    assert qual["fit_score"] >= 0.5
+    assert qual["status"] in ["QUALIFIED", "PARTIAL_FIT"]
+    assert len(qual["why_fit"]) > 0
+    assert len(qual["matched_criteria"]) > 0
+    assert len(qual["proposal_hooks"]) > 0
+
+
+# --- Unified Agent Run API Tests ---
+
+
+@pytest.mark.asyncio
+async def test_agent_run_with_company_name_only(client: AsyncClient):
+    """Calling /api/agent/run with only company_name auto-generates default qualification goal."""
+    mock_resp = LLMResponse(
+        request_id="res_auto_goal",
+        content="Supabase is an open-source Firebase alternative providing Postgres backend services.",
+        finish_reason="stop",
+        prompt_tokens=40,
+        completion_tokens=20,
+        total_tokens=60,
+    )
+
+    with patch("app.agent.runner.call_llm", return_value=mock_resp):
+        response = await client.post(
+            "/api/agent/run",
+            json={"company_name": "Supabase"},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["goal"] == "Investigate Supabase and qualify fit for platform outreach"
+    assert "Supabase is an open-source" in data["final_answer"]
+
+
+@pytest.mark.asyncio
+async def test_agent_run_includes_qualification_verdict(client: AsyncClient):
+    """Full /api/agent/run execution returns structured qualification when evaluate_lead_fit was executed."""
+    step1_resp = LLMResponse(
+        request_id="res_run_qual1",
+        content="",
+        tool_calls=[
+            ToolCallPayload(
+                id="call_lead_fit_run",
+                name="evaluate_lead_fit",
+                arguments={
+                    "company_name": "Confluent",
+                    "offerings_summary": "Confluent provides enterprise cloud data streaming, Apache Kafka B2B SaaS platform for developer APIs.",
+                },
+            )
+        ],
+        finish_reason="tool_calls",
+        prompt_tokens=70,
+        completion_tokens=25,
+        total_tokens=95,
+    )
+
+    step2_resp = LLMResponse(
+        request_id="res_run_qual2",
+        content="Confluent is evaluated and qualified as an enterprise data streaming platform.",
+        finish_reason="stop",
+        prompt_tokens=130,
+        completion_tokens=30,
+        total_tokens=160,
+    )
+
+    with patch("app.agent.runner.call_llm", side_effect=[step1_resp, step2_resp]):
+        response = await client.post(
+            "/api/agent/run",
+            json={
+                "company_name": "Confluent",
+                "goal": "Investigate and qualify Confluent for data infrastructure partnership",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["qualification"] is not None
+    assert data["qualification"]["is_fit"] is True
+    assert data["qualification"]["fit_score"] >= 0.5
+    assert len(data["qualification"]["why_fit"]) > 0
+    assert len(data["qualification"]["proposal_hooks"]) > 0

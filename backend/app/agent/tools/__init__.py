@@ -2,6 +2,7 @@
 
 from app.agent.tools.base import BaseTool, ToolOutput, ToolPermissionLevel
 from app.agent.tools.definitions import (
+    DEFAULT_PLATFORM_ICP_CRITERIA,
     EvaluateLeadFitInput,
     EvaluateLeadFitTool,
     FetchWebpageInput,
@@ -15,6 +16,7 @@ __all__ = [
     "BaseTool",
     "ToolOutput",
     "ToolPermissionLevel",
+    "DEFAULT_PLATFORM_ICP_CRITERIA",
     "SearchCompanyInput",
     "SearchCompanyTool",
     "FetchWebpageInput",

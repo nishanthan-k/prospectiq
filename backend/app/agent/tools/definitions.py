@@ -1,5 +1,5 @@
 import re
-from typing import Any
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -129,6 +129,13 @@ class FetchWebpageTool(BaseTool):
 
 # --- 3. EvaluateLeadFitTool ---
 
+DEFAULT_PLATFORM_ICP_CRITERIA: list[str] = [
+    "B2B SaaS, Cloud, or Enterprise Technology business model",
+    "Digital products, developer APIs, or cloud infrastructure offerings",
+    "Enterprise or mid-market commercial customer audience",
+    "Multi-user, security, or compliance operational requirements",
+]
+
 
 class EvaluateLeadFitInput(BaseModel):
     """Input parameters for evaluate_lead_fit tool."""
@@ -138,9 +145,9 @@ class EvaluateLeadFitInput(BaseModel):
         ...,
         description="Factual summary of the company's offerings, products, services, or business model",
     )
-    target_criteria: list[str] = Field(
-        ...,
-        description="List of qualification criteria to test against (e.g. 'B2B SaaS', 'Enterprise infrastructure')",
+    target_criteria: Optional[list[str]] = Field(
+        default=None,
+        description="Optional qualification criteria to test against. Defaults to platform ICP criteria if omitted.",
     )
 
 
@@ -159,45 +166,84 @@ class EvaluateLeadFitTool(BaseTool):
         self,
         company_name: str,
         offerings_summary: str,
-        target_criteria: list[str],
+        target_criteria: Optional[list[str]] = None,
     ) -> dict[str, Any]:
+        criteria = target_criteria or DEFAULT_PLATFORM_ICP_CRITERIA
         log.info(
-            f"Executing evaluate_lead_fit for '{company_name}' against {len(target_criteria)} criteria"
+            f"Executing evaluate_lead_fit for '{company_name}' against {len(criteria)} criteria"
         )
         summary_lower = offerings_summary.lower()
 
         matched_criteria: list[str] = []
         unmatched_criteria: list[str] = []
 
-        for criterion in target_criteria:
-            crit_clean = re.sub(r"[^\w\s]", " ", criterion.lower())
-            tokens = [t for t in crit_clean.split() if len(t) >= 3]
+        for criterion in criteria:
+            crit_lower = criterion.lower()
+            subclauses = [c.strip() for c in re.split(r",|\bor\b", crit_lower) if c.strip()]
+            criterion_matched = False
 
-            # Check if majority of distinctive tokens in criterion match summary
-            if not tokens:
-                matched_criteria.append(criterion)
-                continue
+            if len(subclauses) > 1:
+                for sub in subclauses:
+                    sub_clean = re.sub(r"[^\w\s]", " ", sub)
+                    tokens = [t for t in sub_clean.split() if len(t) >= 3]
+                    if not tokens:
+                        continue
+                    matches = sum(
+                        1 for t in tokens if re.search(rf"\b{re.escape(t)}\b", summary_lower)
+                    )
+                    threshold = 1.0 if len(tokens) <= 2 else 0.5
+                    if matches / len(tokens) >= threshold:
+                        criterion_matched = True
+                        break
 
-            matches = sum(1 for t in tokens if re.search(rf"\b{re.escape(t)}\b", summary_lower))
-            overlap_ratio = matches / len(tokens)
+            if not criterion_matched:
+                crit_clean = re.sub(r"[^\w\s]", " ", crit_lower)
+                tokens = [t for t in crit_clean.split() if len(t) >= 3]
+                if not tokens:
+                    criterion_matched = True
+                else:
+                    matches = sum(
+                        1 for t in tokens if re.search(rf"\b{re.escape(t)}\b", summary_lower)
+                    )
+                    if matches / len(tokens) >= 0.4:
+                        criterion_matched = True
 
-            if overlap_ratio >= 0.5:
+            if criterion_matched:
                 matched_criteria.append(criterion)
             else:
                 unmatched_criteria.append(criterion)
 
-        total_criteria = len(target_criteria)
+        total_criteria = len(criteria)
         fit_score = round(len(matched_criteria) / total_criteria, 2) if total_criteria > 0 else 0.0
         is_qualified = fit_score >= 0.5
+        status = (
+            "QUALIFIED"
+            if fit_score >= 0.75
+            else ("PARTIAL_FIT" if fit_score >= 0.5 else "DISQUALIFIED")
+        )
+
+        why_fit = [f"Matches: {crit}" for crit in matched_criteria]
+        why_not_fit = [f"No evidence found for: {crit}" for crit in unmatched_criteria]
+        proposal_hooks = [
+            f"Tailor outreach around {matched_criteria[0]}"
+            if matched_criteria
+            else "Focus on core infrastructure efficiency"
+        ]
+        if len(matched_criteria) > 1:
+            proposal_hooks.append(f"Highlight synergies with {matched_criteria[1]}")
 
         return {
             "company_name": company_name,
             "fit_score": fit_score,
             "is_qualified": is_qualified,
+            "status": status,
+            "why_fit": why_fit,
+            "why_not_fit": why_not_fit,
             "matched_criteria": matched_criteria,
             "unmatched_criteria": unmatched_criteria,
+            "proposal_hooks": proposal_hooks,
             "evaluation_note": (
                 f"{company_name} meets {len(matched_criteria)}/{total_criteria} target criteria "
-                f"(fit score: {fit_score * 100:.0f}%)."
+                f"(fit score: {fit_score * 100:.0f}%, status: {status})."
             ),
         }
