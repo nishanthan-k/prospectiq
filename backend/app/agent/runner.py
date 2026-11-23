@@ -100,7 +100,7 @@ class AgentRunner:
                 tool_choice="auto" if openai_tools else None,
                 model=self.model,
                 temperature=0.2,
-                max_tokens=600 if openai_tools else 1500,
+                max_tokens=512,
                 request_id=f"{req_id}_s{step}",
             )
 
@@ -233,7 +233,7 @@ class AgentRunner:
             tool_choice=None,
             model=self.model,
             temperature=0.2,
-            max_tokens=1500,
+            max_tokens=512,
             request_id=f"{req_id}_forced_synth",
         )
 

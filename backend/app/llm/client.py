@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import json
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -162,6 +163,65 @@ RETRYABLE_ERRORS = (
 )
 
 
+def _extract_rate_limit_wait(exc: BaseException) -> Optional[float]:
+    """
+    Extract rate limit wait time in seconds from a RateLimitError.
+    First tries reading the 'retry-after' header from exc.response.
+    Falls back to regex parsing 'try again in <seconds>s' from str(exc).
+    Applies a +0.5s buffer and caps at 60.0s.
+    """
+    if not isinstance(exc, RateLimitError):
+        return None
+
+    wait_s: Optional[float] = None
+
+    # 1. Try reading 'retry-after' header from response if available
+    response = getattr(exc, "response", None)
+    if response is not None:
+        headers = getattr(response, "headers", None)
+        if headers and hasattr(headers, "get"):
+            retry_after = headers.get("retry-after") or headers.get("Retry-After")
+            if retry_after is not None:
+                try:
+                    wait_s = float(retry_after)
+                except (ValueError, TypeError):
+                    pass
+
+    # 2. Fallback: Parse 'try again in <seconds>s' from exception message
+    if wait_s is None:
+        match = re.search(r"try again in (\d+(?:\.\d+)?)s", str(exc), re.IGNORECASE)
+        if match:
+            try:
+                wait_s = float(match.group(1))
+            except (ValueError, TypeError):
+                pass
+
+    if wait_s is not None and wait_s >= 0:
+        return min(wait_s + 0.5, 60.0)
+
+    return None
+
+
+def _smart_wait(retry_state: RetryCallState) -> float:
+    """
+    Rate-limit-aware Tenacity wait strategy.
+    Returns the extracted rate-limit wait time on RateLimitError,
+    otherwise falls back to exponential backoff.
+    """
+    if retry_state.outcome and retry_state.outcome.failed:
+        exc = retry_state.outcome.exception()
+        if exc is not None:
+            rl_wait = _extract_rate_limit_wait(exc)
+            if rl_wait is not None:
+                return rl_wait
+
+    fallback = wait_exponential(
+        min=settings.llm_retry_min_wait,
+        max=settings.llm_retry_max_wait,
+    )
+    return fallback(retry_state)
+
+
 def _make_before_sleep_logger(
     request_id: str, max_retries: int
 ) -> Callable[[RetryCallState], None]:
@@ -241,10 +301,7 @@ async def _execute_create(
 ) -> Any:
     retryer = AsyncRetrying(
         stop=stop_after_attempt(max_retries + 1),
-        wait=wait_exponential(
-            min=settings.llm_retry_min_wait,
-            max=settings.llm_retry_max_wait,
-        ),
+        wait=_smart_wait,
         retry=retry_if_exception_type(RETRYABLE_ERRORS),
         before_sleep=_make_before_sleep_logger(request_id, max_retries),
         reraise=True,
