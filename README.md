@@ -19,8 +19,8 @@ Built systematically across 8 production-grade milestones:
 
 ## Monorepo Packages
 
-* [**backend/**](backend/README.md) – FastAPI service, Groq LLM integration, sales intelligence engine, and database persistence.
-* **frontend/** – Web dashboard for lead submission, evidence inspection, and outreach review *(planned for later levels)*.
+- [**backend/**](backend/README.md) – FastAPI service, Google Gemini LLM integration, sales intelligence engine, and database persistence.
+- **frontend/** – Web dashboard for lead submission, evidence inspection, and outreach review _(planned for later levels)_.
 
 For backend setup, environment configuration, and API reference, see [backend/README.md](backend/README.md).
 

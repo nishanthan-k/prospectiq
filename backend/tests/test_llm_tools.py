@@ -51,7 +51,7 @@ def test_llm_response_defaults_tool_calls_empty():
 
 @pytest.mark.asyncio
 async def test_call_llm_parses_single_tool_call():
-    """call_llm parses a single tool call from the Groq message into ToolCallPayload."""
+    """call_llm parses a single tool call from the LLM message into ToolCallPayload."""
     raw_tc = MagicMock()
     raw_tc.id = "call_search_1"
     raw_tc.function = MagicMock()
@@ -165,7 +165,7 @@ async def test_call_llm_resilient_tool_arguments_parsing():
 
 @pytest.mark.asyncio
 async def test_call_llm_forwards_tools_and_tool_choice():
-    """call_llm forwards tools and tool_choice parameters to groq completions create."""
+    """call_llm forwards tools and tool_choice parameters to completions create."""
     mock_choice = MagicMock()
     mock_choice.finish_reason = "stop"
     mock_choice.message = MagicMock(content="Done.", tool_calls=None)
@@ -193,7 +193,7 @@ async def test_call_llm_forwards_tools_and_tool_choice():
 
 @pytest.mark.asyncio
 async def test_call_llm_preserves_multi_turn_messages():
-    """call_llm passes multi-turn messages array directly to Groq client."""
+    """call_llm passes multi-turn messages array directly to LLM client."""
     mock_choice = MagicMock()
     mock_choice.finish_reason = "stop"
     mock_choice.message = MagicMock(content="Here is the report.", tool_calls=None)

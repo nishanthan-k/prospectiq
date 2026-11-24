@@ -195,7 +195,7 @@ async def test_synthesize_evidence_handles_llm_failure():
     ]
 
     with patch(
-        "app.research.evidence.call_llm", side_effect=RuntimeError("Groq API rate limit exceeded")
+        "app.research.evidence.call_llm", side_effect=RuntimeError("Gemini API rate limit exceeded")
     ):
         summary, citations, is_insufficient, reasons = await synthesize_evidence(
             company_name="Example Corp",

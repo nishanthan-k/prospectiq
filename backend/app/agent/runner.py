@@ -124,24 +124,31 @@ class AgentRunner:
                 )
 
             # Case B: Model requested tool invocations
-            # 1. Append assistant message with tool_calls (strict OpenAI/Groq protocol)
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": resp.content or None,
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.name,
-                                "arguments": json.dumps(tc.arguments),
-                            },
-                        }
-                        for tc in resp.tool_calls
-                    ],
-                }
-            )
+            # 1. Append assistant message with tool_calls (strict OpenAI/Gemini protocol)
+            if resp.raw_message:
+                messages.append(resp.raw_message)
+            else:
+                assistant_tool_calls: list[dict[str, Any]] = []
+                for tc in resp.tool_calls:
+                    tc_dict: dict[str, Any] = {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments),
+                        },
+                    }
+                    if tc.extra_content:
+                        tc_dict["extra_content"] = tc.extra_content
+                    assistant_tool_calls.append(tc_dict)
+
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": resp.content or None,
+                        "tool_calls": assistant_tool_calls,
+                    }
+                )
 
             # 2. Cycle detection: check if identical tool signature was called in recent turns
             step_sig = "|".join(
@@ -233,7 +240,7 @@ class AgentRunner:
             tool_choice=None,
             model=self.model,
             temperature=0.2,
-            max_tokens=512,
+            max_tokens=1500,
             request_id=f"{req_id}_forced_synth",
         )
 

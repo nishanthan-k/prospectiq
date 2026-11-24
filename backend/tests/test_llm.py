@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 from fastapi.responses import StreamingResponse
-from groq import APIConnectionError, APITimeoutError, BadRequestError, RateLimitError
+from openai import APIConnectionError, APITimeoutError, BadRequestError, RateLimitError
 
 from app.core.config import get_settings
 from app.llm import (
@@ -87,9 +87,9 @@ async def test_call_llm_custom_request_id():
 @pytest.mark.asyncio
 async def test_call_llm_exception_reraised():
     mock_client = AsyncMock()
-    mock_client.chat.completions.create.side_effect = RuntimeError("Groq network error")
+    mock_client.chat.completions.create.side_effect = RuntimeError("Network error")
 
-    with pytest.raises(RuntimeError, match="Groq network error"):
+    with pytest.raises(RuntimeError, match="Network error"):
         await call_llm(LLMRequest(prompt="Will fail"), client=mock_client)
 
 
@@ -118,7 +118,9 @@ async def test_call_llm_uses_per_request_timeout_override():
 @pytest.mark.asyncio
 async def test_call_llm_api_timeout_error_raises_llm_timeout_error():
     mock_client = AsyncMock()
-    mock_request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    mock_request = httpx.Request(
+        "POST", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    )
     mock_client.chat.completions.create.side_effect = APITimeoutError(request=mock_request)
 
     req = LLMRequest(
@@ -154,7 +156,9 @@ async def test_call_llm_retries_with_global_default_and_succeeds(monkeypatch):
     monkeypatch.setattr(settings, "llm_retry_min_wait", 0.0)
     monkeypatch.setattr(settings, "llm_retry_max_wait", 0.0)
 
-    mock_request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    mock_request = httpx.Request(
+        "POST", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    )
     mock_response = httpx.Response(429, request=mock_request)
     rate_limit_err = RateLimitError("Rate limited", response=mock_response, body=None)
 
@@ -178,7 +182,9 @@ async def test_call_llm_per_request_max_retries_override(monkeypatch):
     monkeypatch.setattr(settings, "llm_retry_min_wait", 0.0)
     monkeypatch.setattr(settings, "llm_retry_max_wait", 0.0)
 
-    mock_request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    mock_request = httpx.Request(
+        "POST", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    )
     mock_client = AsyncMock()
     mock_client.chat.completions.create.side_effect = APIConnectionError(request=mock_request)
 
@@ -194,7 +200,9 @@ async def test_call_llm_retries_exhausted_on_timeout_raises_llm_timeout_error(mo
     monkeypatch.setattr(settings, "llm_retry_min_wait", 0.0)
     monkeypatch.setattr(settings, "llm_retry_max_wait", 0.0)
 
-    mock_request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    mock_request = httpx.Request(
+        "POST", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    )
     mock_client = AsyncMock()
     mock_client.chat.completions.create.side_effect = APITimeoutError(request=mock_request)
 
@@ -212,7 +220,9 @@ async def test_call_llm_retries_exhausted_on_timeout_raises_llm_timeout_error(mo
 
 @pytest.mark.asyncio
 async def test_call_llm_non_retryable_error_fails_immediately():
-    mock_request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    mock_request = httpx.Request(
+        "POST", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    )
     mock_response = httpx.Response(400, request=mock_request)
     bad_req_err = BadRequestError("Invalid model", response=mock_response, body=None)
 
@@ -241,16 +251,13 @@ def create_mock_stream_chunk(
     mock_chunk = MagicMock()
     mock_chunk.choices = [mock_choice]
     mock_chunk.usage = None
-    mock_chunk.x_groq = None
 
     if prompt_tokens is not None and completion_tokens is not None:
         mock_usage = MagicMock()
         mock_usage.prompt_tokens = prompt_tokens
         mock_usage.completion_tokens = completion_tokens
         mock_usage.total_tokens = prompt_tokens + completion_tokens
-        mock_x_groq = MagicMock()
-        mock_x_groq.usage = mock_usage
-        mock_chunk.x_groq = mock_x_groq
+        mock_chunk.usage = mock_usage
 
     return mock_chunk
 
@@ -325,13 +332,13 @@ async def test_call_llm_streaming_timeout_emits_error_event():
 def test_extract_rate_limit_wait_non_rate_limit_error():
     """Non-RateLimitError exceptions return None."""
     assert _extract_rate_limit_wait(ValueError("some error")) is None
-    req = httpx.Request("POST", "https://api.groq.com")
+    req = httpx.Request("POST", "https://generativelanguage.googleapis.com")
     assert _extract_rate_limit_wait(APIConnectionError(request=req)) is None
 
 
 def test_extract_rate_limit_wait_from_response_headers():
     """Reads retry-after duration from HTTP response headers with +0.5s buffer."""
-    req = httpx.Request("POST", "https://api.groq.com")
+    req = httpx.Request("POST", "https://generativelanguage.googleapis.com")
     resp = httpx.Response(429, request=req, headers={"retry-after": "7.5"})
     err = RateLimitError("Rate limit reached", response=resp, body=None)
 
@@ -346,12 +353,9 @@ def test_extract_rate_limit_wait_from_response_headers():
 
 def test_extract_rate_limit_wait_from_regex_message():
     """Falls back to parsing 'try again in <seconds>s' regex from error message body."""
-    req = httpx.Request("POST", "https://api.groq.com")
+    req = httpx.Request("POST", "https://generativelanguage.googleapis.com")
     resp = httpx.Response(429, request=req)  # No retry-after header
-    msg = (
-        "Rate limit reached for model `openai/gpt-oss-120b` on TPM: Limit 8000, "
-        "Used 6614, Requested 2421. Please try again in 7.762499999s."
-    )
+    msg = "Rate limit reached for model `gemini-3.1-flash-lite`: Please try again in 7.762499999s."
     err = RateLimitError(msg, response=resp, body=None)
 
     wait = _extract_rate_limit_wait(err)
@@ -361,7 +365,7 @@ def test_extract_rate_limit_wait_from_regex_message():
 
 def test_extract_rate_limit_wait_capped_at_60_seconds():
     """Extracted wait time is capped at 60.0s."""
-    req = httpx.Request("POST", "https://api.groq.com")
+    req = httpx.Request("POST", "https://generativelanguage.googleapis.com")
     resp = httpx.Response(429, request=req, headers={"retry-after": "90.0"})
     err = RateLimitError("Rate limit reached", response=resp, body=None)
 
@@ -371,7 +375,7 @@ def test_extract_rate_limit_wait_capped_at_60_seconds():
 
 def test_extract_rate_limit_wait_returns_none_when_no_duration():
     """Returns None when no duration is specified in headers or message."""
-    req = httpx.Request("POST", "https://api.groq.com")
+    req = httpx.Request("POST", "https://generativelanguage.googleapis.com")
     resp = httpx.Response(429, request=req)
     err = RateLimitError("Generic rate limit with no time specified", response=resp, body=None)
     assert _extract_rate_limit_wait(err) is None
@@ -396,7 +400,7 @@ def test_smart_wait_strategy(monkeypatch):
             self.attempt_number = 1
             self.outcome = DummyOutcome(exc)
 
-    req = httpx.Request("POST", "https://api.groq.com")
+    req = httpx.Request("POST", "https://generativelanguage.googleapis.com")
     resp = httpx.Response(429, request=req, headers={"retry-after": "5.0"})
     rate_err = RateLimitError("Rate limit", response=resp, body=None)
 

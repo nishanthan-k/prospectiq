@@ -36,7 +36,7 @@ class DummyTool(BaseTool):
 
 
 def test_base_tool_openai_schema_generation():
-    """to_openai_schema produces valid OpenAI/Groq function-calling specification."""
+    """to_openai_schema produces valid OpenAI/Gemini function-calling specification."""
     tool = DummyTool()
     schema = tool.to_openai_schema()
 

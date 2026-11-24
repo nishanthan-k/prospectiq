@@ -8,9 +8,13 @@ ENV_FILE = Path(__file__).resolve().parent.parent.parent / ".env"
 
 
 class Settings(BaseSettings):
-    groq_api_key: str
-    default_model: str = "openai/gpt-oss-120b"
-    fast_model: str = "openai/gpt-oss-20b"
+    gemini_api_key: str = Field(default="", description="Google Gemini API Key")
+    gemini_base_url: str = Field(
+        default="https://generativelanguage.googleapis.com/v1beta/openai/",
+        description="Google AI Studio OpenAI-compatible base URL",
+    )
+    default_model: str = "gemini-3.1-flash-lite"
+    fast_model: str = "gemini-3.1-flash-lite"
     host: str = "0.0.0.0"
     port: int = 8000
     log_level: str = "INFO"
