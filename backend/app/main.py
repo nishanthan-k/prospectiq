@@ -21,8 +21,8 @@ from app.llm import (
     LLMRequest,
     LLMTimeoutError,
     call_llm,
-    close_groq_client,
-    get_groq_client,
+    close_gemini_client,
+    get_gemini_client,
 )
 from app.research import ResearchRequest, ResearchResponse, conduct_research
 
@@ -31,9 +31,9 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    get_groq_client()
+    get_gemini_client()
     yield
-    await close_groq_client()
+    await close_gemini_client()
 
 
 app = FastAPI(

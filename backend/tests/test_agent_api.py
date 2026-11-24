@@ -188,7 +188,7 @@ async def test_agent_api_llm_timeout_returns_504(client: AsyncClient):
     """Agent API forwards LLM timeout to 504 Gateway Timeout response."""
     with patch(
         "app.agent.runner.call_llm",
-        side_effect=LLMTimeoutError("Groq API timed out after 30.0s", timeout_seconds=30.0),
+        side_effect=LLMTimeoutError("Gemini API timed out after 30.0s", timeout_seconds=30.0),
     ):
         response = await client.post(
             "/api/agent/run",

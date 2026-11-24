@@ -7,7 +7,7 @@ FastAPI service powering the autonomous AI Sales Intelligence & Outreach Agent.
 ## Tech Stack
 
 - **Framework:** [FastAPI](https://fastapi.tiangolo.com/) + [Uvicorn](https://www.uvicorn.org/)
-- **LLM Engine:** [Groq](https://groq.com/) (using `openai/gpt-oss-120b` for deep sales analysis)
+- **LLM Engine:** [Google Gemini](https://aistudio.google.com/) (`gemini-3.1-flash-lite` via OpenAI-compatible endpoint)
 - **Validation:** [Pydantic v2](https://docs.pydantic.dev/) & [pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/)
 - **Logging:** [Loguru](https://github.com/Delgan/loguru) structured logging with request correlation IDs and latency tracking
 - **Package Manager:** [`uv`](https://docs.astral.sh/uv/)
@@ -29,7 +29,7 @@ uv pip install -e ".[dev]"
 
 ### 2. Environment Configuration
 
-Copy the template and add your free Groq API key:
+Copy the template and add your free Google Gemini API key:
 
 ```bash
 cp .env.example .env
@@ -38,9 +38,9 @@ cp .env.example .env
 Edit `.env`:
 
 ```env
-GROQ_API_KEY=gsk_your_groq_api_key_here
-DEFAULT_MODEL=openai/gpt-oss-120b
-FAST_MODEL=openai/gpt-oss-20b
+GEMINI_API_KEY=your_gemini_api_key_here
+DEFAULT_MODEL=gemini-3.1-flash-lite
+FAST_MODEL=gemini-3.1-flash-lite
 ```
 
 ### 3. Start the Server
@@ -79,10 +79,9 @@ Returns service status.
 
 ---
 
-
 ### `POST /api/chat`
 
-Sends a prompt to the Groq LLM with sales intelligence system prompt and returns structured completion metrics.
+Sends a prompt to the Google Gemini LLM with sales intelligence system prompt and returns structured completion metrics.
 
 **Request Body (`application/json`):**
 
@@ -148,9 +147,7 @@ _`company_name` is mandatory. `domain` and `summary` (existing CRM notes/context
   ],
   "is_insufficient_evidence": false,
   "insufficient_reasons": [],
-  "sources_scraped": [
-    "https://stripe.com"
-  ],
-  "latency_ms": 520.10
+  "sources_scraped": ["https://stripe.com"],
+  "latency_ms": 520.1
 }
 ```

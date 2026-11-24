@@ -33,7 +33,7 @@ class BaseTool(ABC):
     requires_approval: bool = False
 
     def to_openai_schema(self) -> dict[str, Any]:
-        """Convert Pydantic argument schema to OpenAI/Groq function-calling specification."""
+        """Convert Pydantic argument schema to OpenAI/Gemini function-calling specification."""
         json_schema = self.args_schema.model_json_schema()
         # Clean top-level title for cleaner prompt presentation
         json_schema.pop("title", None)

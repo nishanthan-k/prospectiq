@@ -8,10 +8,10 @@ from collections.abc import AsyncIterator
 from typing import Any, Callable, Optional, Union
 
 from fastapi.responses import StreamingResponse
-from groq import (
+from openai import (
     APIConnectionError,
     APITimeoutError,
-    AsyncGroq,
+    AsyncOpenAI,
     InternalServerError,
     RateLimitError,
 )
@@ -40,6 +40,10 @@ class ToolCallPayload(BaseModel):
     arguments: dict[str, Any] = Field(
         default_factory=dict,
         description="Parsed JSON arguments for the tool",
+    )
+    extra_content: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Provider-specific extra content (e.g. Google Gemini thought_signature)",
     )
 
 
@@ -103,7 +107,7 @@ class LLMRequest(BaseModel):
     )
     tools: Optional[list[dict[str, Any]]] = Field(
         default=None,
-        description="Optional list of tool definitions in OpenAI/Groq function-calling format",
+        description="Optional list of tool definitions in OpenAI/Gemini function-calling format",
     )
     tool_choice: Optional[Union[str, dict[str, Any]]] = Field(
         default=None,
@@ -142,6 +146,10 @@ class LLMResponse(BaseModel):
     tool_calls: list[ToolCallPayload] = Field(
         default_factory=list,
         description="Structured tool calls requested by the model",
+    )
+    raw_message: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Raw assistant message dict for exact multi-turn replay",
     )
 
 
@@ -236,33 +244,39 @@ def _make_before_sleep_logger(
     return _log_retry
 
 
-_groq_client: Optional[AsyncGroq] = None
+_llm_client: Optional[AsyncOpenAI] = None
 
 
-def get_groq_client() -> AsyncGroq:
-    """Return the singleton AsyncGroq client instance, creating it if needed."""
-    global _groq_client
-    if _groq_client is None:
-        _groq_client = AsyncGroq(
-            api_key=settings.groq_api_key,
+def get_gemini_client() -> AsyncOpenAI:
+    """Return the singleton AsyncOpenAI client instance configured for Google Gemini."""
+    global _llm_client
+    if _llm_client is None:
+        _llm_client = AsyncOpenAI(
+            api_key=settings.gemini_api_key or "missing_gemini_api_key",
+            base_url=settings.gemini_base_url,
             timeout=settings.llm_timeout_seconds,
             max_retries=0,
         )
-    return _groq_client
+    return _llm_client
 
 
-async def close_groq_client() -> None:
-    """Close the singleton AsyncGroq client and reset it."""
-    global _groq_client
-    if _groq_client is not None:
-        await _groq_client.close()
-        _groq_client = None
+async def close_gemini_client() -> None:
+    """Close the singleton AsyncOpenAI client and reset it."""
+    global _llm_client
+    if _llm_client is not None:
+        await _llm_client.close()
+        _llm_client = None
+
+
+# Generic aliases
+get_llm_client = get_gemini_client
+close_llm_client = close_gemini_client
 
 
 def _prepare_request(
     params: Union[LLMRequest, str, dict],
-    client: Optional[AsyncGroq],
-) -> tuple[LLMRequest, str, float, int, AsyncGroq, list[dict[str, Any]]]:
+    client: Optional[AsyncOpenAI],
+) -> tuple[LLMRequest, str, float, int, AsyncOpenAI, list[dict[str, Any]]]:
     if isinstance(params, str):
         req = LLMRequest(prompt=params)
     elif isinstance(params, dict):
@@ -275,7 +289,7 @@ def _prepare_request(
         req.timeout_seconds if req.timeout_seconds is not None else settings.llm_timeout_seconds
     )
     max_retries = req.max_retries if req.max_retries is not None else settings.llm_max_retries
-    groq_client = client or get_groq_client()
+    llm_client = client or get_gemini_client()
 
     if req.messages is not None:
         messages: list[dict[str, Any]] = list(req.messages)
@@ -286,11 +300,11 @@ def _prepare_request(
         if req.prompt:
             messages.append({"role": "user", "content": req.prompt})
 
-    return req, request_id, timeout_seconds, max_retries, groq_client, messages
+    return req, request_id, timeout_seconds, max_retries, llm_client, messages
 
 
 async def _execute_create(
-    groq_client: AsyncGroq,
+    llm_client: AsyncOpenAI,
     req: LLMRequest,
     messages: list[dict[str, Any]],
     timeout_seconds: float,
@@ -327,7 +341,7 @@ async def _execute_create(
                     kwargs["tool_choice"] = req.tool_choice
 
                 return await asyncio.wait_for(
-                    groq_client.chat.completions.create(**kwargs),
+                    llm_client.chat.completions.create(**kwargs),
                     timeout=timeout_seconds,
                 )
     except (APITimeoutError, TimeoutError) as exc:
@@ -349,7 +363,7 @@ async def _execute_create(
             )
             req.model = settings.fast_model
             return await _execute_create(
-                groq_client=groq_client,
+                llm_client=llm_client,
                 req=req,
                 messages=messages,
                 timeout_seconds=timeout_seconds,
@@ -365,15 +379,15 @@ async def _execute_create(
 
 async def call_llm(
     params: Union[LLMRequest, str, dict],
-    client: Optional[AsyncGroq] = None,
+    client: Optional[AsyncOpenAI] = None,
 ) -> Union[LLMResponse, StreamingResponse]:
     """
-    Execute an LLM call using Groq with request correlation and latency tracking.
+    Execute an LLM call using Google Gemini with request correlation and latency tracking.
 
     When params.stream is True, returns a StreamingResponse with Server-Sent Events.
     When params.stream is False (default), returns an LLMResponse.
     """
-    req, request_id, timeout_seconds, max_retries, groq_client, messages = _prepare_request(
+    req, request_id, timeout_seconds, max_retries, llm_client, messages = _prepare_request(
         params, client
     )
 
@@ -385,7 +399,7 @@ async def call_llm(
 
     start_time = time.perf_counter()
     response = await _execute_create(
-        groq_client,
+        llm_client,
         req,
         messages,
         timeout_seconds,
@@ -413,10 +427,7 @@ async def call_llm(
                             if choice.delta and choice.delta.content:
                                 yield f"data: {json.dumps({'request_id': request_id, 'delta': choice.delta.content})}\n\n"
 
-                        x_groq = getattr(chunk, "x_groq", None)
-                        chunk_usage = getattr(chunk, "usage", None) or (
-                            x_groq.usage if x_groq is not None else None
-                        )
+                        chunk_usage = getattr(chunk, "usage", None)
                         if chunk_usage:
                             prompt_tokens = chunk_usage.prompt_tokens
                             completion_tokens = chunk_usage.completion_tokens
@@ -484,6 +495,9 @@ async def call_llm(
             fn = getattr(rtc, "function", None)
             fn_name = getattr(fn, "name", "") if fn else ""
             raw_args = getattr(fn, "arguments", "{}") if fn else "{}"
+            extra_content = getattr(rtc, "extra_content", None)
+            if not isinstance(extra_content, dict):
+                extra_content = None
 
             # Resilient argument parsing using _safe_parse_json
             parsed_args = _safe_parse_json(raw_args) if isinstance(raw_args, str) else raw_args
@@ -495,8 +509,20 @@ async def call_llm(
                     id=tc_id,
                     name=fn_name,
                     arguments=parsed_args,
+                    extra_content=extra_content,
                 )
             )
+
+    raw_message: Optional[dict[str, Any]] = None
+    if hasattr(choice, "message"):
+        model_dump_fn = getattr(choice.message, "model_dump", None)
+        if callable(model_dump_fn):
+            try:
+                dumped = model_dump_fn(exclude_unset=True)
+                if isinstance(dumped, dict):
+                    raw_message = dumped
+            except Exception:
+                raw_message = None
 
     log.info(
         f"[{request_id}] LLM call completed in {latency_ms:.0f}ms: "
@@ -515,4 +541,5 @@ async def call_llm(
         total_tokens=total_tokens,
         latency_ms=round(latency_ms, 2),
         tool_calls=parsed_tool_calls,
+        raw_message=raw_message,
     )

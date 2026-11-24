@@ -49,7 +49,7 @@ class ToolRegistry:
         allowed_names: Optional[list[str]] = None,
         permission_filter: Optional[ToolPermissionLevel] = None,
     ) -> list[dict[str, Any]]:
-        """Generate OpenAI/Groq function-calling tool schema definitions."""
+        """Generate OpenAI/Gemini function-calling tool schema definitions."""
         tools = self.list_tools(
             permission_filter=permission_filter,
             allowed_names=allowed_names,

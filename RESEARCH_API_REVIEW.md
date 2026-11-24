@@ -42,7 +42,7 @@ flowchart TD
     CheckWords -- No --> ContextCut["Starve Context:<br/>Slice to 3 chunks × 400 chars (1200 chars max)"]
 
     %% LLM & Verification
-    ContextCut --> CallLLM["LLM Synthesis (Groq fast_model)<br/>response_format: json_object"]
+    ContextCut --> CallLLM["LLM Synthesis (Gemini fast_model)<br/>response_format: json_object"]
     CallLLM --> SafeParse["_safe_parse_json()"]
     SafeParse -- Parse Error / Truncated --> ModelError["❌ is_insufficient_evidence: True<br/>('Malformed model output')"]
     SafeParse -- Parsed --> Pydantic["LLMResearchOutput.model_validate()"]
@@ -60,20 +60,22 @@ flowchart TD
 ### A. "No JSON Output" & Malformed Model Output Errors
 
 #### 1. Context Starvation & Token Truncation
-* **Location:** `backend/app/research/evidence.py` (Lines 246–249)
-* **Mechanism:**
+
+- **Location:** `backend/app/research/evidence.py` (Lines 246–249)
+- **Mechanism:**
   ```python
   context_blocks = []
   for idx, rc in enumerate(ranked_chunks[:3], 1):
       clean_chunk = rc.chunk[:400].strip()
       context_blocks.append(f"--- Source [{idx}]: {rc.url} ---\n{clean_chunk}")
   ```
-  Only 3 chunks capped at 400 characters (max 1,200 characters / ~200 words) are provided to the LLM. When reasoning models (e.g., DeepSeek-R1 distillations or OSS models on Groq) emit `<think>...</think>` tokens, the token generation hits the `max_tokens=1500` ceiling before JSON formatting is finalized.
-* **Result:** Stripping `<think>` leaves an incomplete, truncated JSON string. `_safe_parse_json` fails to recover complete objects, returning `None`.
+  Only 3 chunks capped at 400 characters (max 1,200 characters / ~200 words) are provided to the LLM. When reasoning models emit `<think>...</think>` tokens, the token generation hits the `max_tokens=1500` ceiling before JSON formatting is finalized.
+- **Result:** Stripping `<think>` leaves an incomplete, truncated JSON string. `_safe_parse_json` fails to recover complete objects, returning `None`.
 
 #### 2. `StrictBool` Schema Rejection
-* **Location:** `backend/app/research/models.py` (Lines 86–88)
-* **Mechanism:**
+
+- **Location:** `backend/app/research/models.py` (Lines 86–88)
+- **Mechanism:**
   ```python
   class LLMResearchOutput(BaseModel):
       ...
@@ -82,11 +84,12 @@ flowchart TD
       )
   ```
   In Pydantic v2, `StrictBool` rejects type coercion. When the LLM outputs `"is_insufficient_evidence": "false"` or `"true"` (string representation), Pydantic throws a `ValidationError`.
-* **Result:** `evidence.py` catches this `ValidationError` and reports:
+- **Result:** `evidence.py` catches this `ValidationError` and reports:
   `"Unable to synthesize research due to malformed model output: LLM response was not valid structured JSON: ..."`
 
 #### 3. Zero Self-Correction / Repair Turn
-* If `call_llm` produces malformed JSON or fails Pydantic validation, the system immediately returns an error response with zero retry or correction prompt.
+
+- If `call_llm` produces malformed JSON or fails Pydantic validation, the system immediately returns an error response with zero retry or correction prompt.
 
 ---
 
@@ -94,75 +97,85 @@ flowchart TD
 
 The research pipeline triggers `is_insufficient_evidence: True` due to artificial choke points rather than lack of real-world company data:
 
-| Trigger Point | File & Lines | Cause |
-| :--- | :--- | :--- |
-| **1. Domain Scraping Failure with No Fallback** | `service.py:112-144` | When `request.domain` fails (Cloudflare 403, timeout, SSL error), `extracted_pages` remains empty. The engine **never falls back to public search**. |
-| **2. Search Engine Scraping Blocks** | `search.py:92-170` | Unauthenticated HTTP scraping of `html.duckduckgo.com` and `bing.com` triggers rate limits or CAPTCHA challenges, returning 0 results. |
+| Trigger Point                                                    | File & Lines          | Cause                                                                                                                                                                                                 |
+| :--------------------------------------------------------------- | :-------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **1. Domain Scraping Failure with No Fallback**                  | `service.py:112-144`  | When `request.domain` fails (Cloudflare 403, timeout, SSL error), `extracted_pages` remains empty. The engine **never falls back to public search**.                                                  |
+| **2. Search Engine Scraping Blocks**                             | `search.py:92-170`    | Unauthenticated HTTP scraping of `html.duckduckgo.com` and `bing.com` triggers rate limits or CAPTCHA challenges, returning 0 results.                                                                |
 | **3. Strict Citation Verification Overriding Complete Research** | `evidence.py:365-368` | If the LLM generates a valid summary but quotes differ by punctuation, curly quotes (`’`), or non-breaking spaces, all citations are dropped. Line 365 then forces `is_insufficient_evidence = True`. |
-| **4. Premature 40-Word Minimum Cutoff** | `evidence.py:236-242` | `extractor.py` drops leaf nodes under 30 characters; pages with concise hero headings fail the 40-word requirement. |
-| **5. Context Starvation Prompt Directive** | `evidence.py:292` | With only 200 words of fragmented context passed, the LLM follows the directive *"If sources do not confirm offerings, set is_insufficient_evidence: true"*. |
+| **4. Premature 40-Word Minimum Cutoff**                          | `evidence.py:236-242` | `extractor.py` drops leaf nodes under 30 characters; pages with concise hero headings fail the 40-word requirement.                                                                                   |
+| **5. Context Starvation Prompt Directive**                       | `evidence.py:292`     | With only 200 words of fragmented context passed, the LLM follows the directive _"If sources do not confirm offerings, set is_insufficient_evidence: true"_.                                          |
 
 ---
 
 ### C. Poor Company Name & Domain Validation (`is_search_result_relevant`)
 
-* **Location:** `backend/app/research/service.py` (Lines 36–71)
+- **Location:** `backend/app/research/service.py` (Lines 36–71)
 
 #### 1. 100% Rejection of Short & Acronym Company Names
+
 ```python
 brand_tokens = [
     t for t in re.findall(r"\w+", company_name.lower())
     if len(t) >= 3 and t not in GENERIC_COMPANY_SUFFIXES
 ]
 ```
-* Companies with <= 2 characters (e.g., **3M, HP, GE, LG, BP, X, EY, AT&T**) yield `brand_tokens = []`.
-* The acronym branch requires `len(all_words) >= 2`. Single-token brands fail this.
-* **Outcome:** Every search result for these companies is marked "irrelevant" and discarded.
+
+- Companies with <= 2 characters (e.g., **3M, HP, GE, LG, BP, X, EY, AT&T**) yield `brand_tokens = []`.
+- The acronym branch requires `len(all_words) >= 2`. Single-token brands fail this.
+- **Outcome:** Every search result for these companies is marked "irrelevant" and discarded.
 
 #### 2. False Positives from Substring Matching
-* `tok in content_to_check` uses unanchored substring matching rather than word boundaries (`\b`):
-  * For company `"Cat"`, the 3-letter token `"cat"` matches `"application"`, `"education"`, `"certificate"`.
-  * Common dictionary words in company names (`"Square"`, `"Target"`, `"General"`, `"Total"`) match unrelated articles.
+
+- `tok in content_to_check` uses unanchored substring matching rather than word boundaries (`\b`):
+  - For company `"Cat"`, the 3-letter token `"cat"` matches `"application"`, `"education"`, `"certificate"`.
+  - Common dictionary words in company names (`"Square"`, `"Target"`, `"General"`, `"Total"`) match unrelated articles.
 
 #### 3. Unchecked Discrepancy Between `company_name` and `domain`
-* If a user supplies mismatched inputs (e.g., `company_name: "Microsoft", domain: "apple.com"`), the system extracts `apple.com` without entity validation. The synthesis prompt instructs the LLM to trust the domain, causing hallucinations or entity-confusion errors.
+
+- If a user supplies mismatched inputs (e.g., `company_name: "Microsoft", domain: "apple.com"`), the system extracts `apple.com` without entity validation. The synthesis prompt instructs the LLM to trust the domain, causing hallucinations or entity-confusion errors.
 
 ---
 
 ## 3. Comprehensive Pipeline Audit (Stage-by-Stage)
 
 ### Stage 1: Request Ingestion & Domain Strategy (`service.py`)
-* **Defect:** Mutually exclusive branching (`if request.domain: ... else: ...`).
-* **Impact:** High fragility. If the specified domain is behind a CDN WAF or bot protection, the research run aborts with 0 sources scraped.
-* **Remedy:** Make public search an automatic fallback when domain extraction yields 0 pages.
+
+- **Defect:** Mutually exclusive branching (`if request.domain: ... else: ...`).
+- **Impact:** High fragility. If the specified domain is behind a CDN WAF or bot protection, the research run aborts with 0 sources scraped.
+- **Remedy:** Make public search an automatic fallback when domain extraction yields 0 pages.
 
 ### Stage 2: Web Search Engine Discovery (`search.py`)
-* **Defect:** Reliance on scraping HTML search result pages with standard User-Agents.
-* **Impact:** DuckDuckGo returns HTTP 202/403 challenges to server environments; Bing returns bot verification.
-* **Remedy:**
+
+- **Defect:** Reliance on scraping HTML search result pages with standard User-Agents.
+- **Impact:** DuckDuckGo returns HTTP 202/403 challenges to server environments; Bing returns bot verification.
+- **Remedy:**
   1. Add realistic browser header profiles (`Sec-Ch-Ua`, `Sec-Fetch-*`).
   2. Implement direct domain resolution heuristics (`https://{company_slug}.com` and `.io`) when search fails.
   3. Add an environment variable hook for structured search APIs (e.g. Tavily, SerpAPI, Brave Search) alongside HTML scraping.
 
 ### Stage 3: SSRF & Security Pre-Flight Checks (`security.py`)
-* **Defect:** Synchronous blocking `socket.getaddrinfo()` on line 127 runs directly inside async request flows.
-* **Impact:** DNS latency stalls the entire Python `asyncio` event loop for concurrent requests.
-* **Remedy:** Wrap in `await asyncio.to_thread(socket.getaddrinfo, ...)`.
+
+- **Defect:** Synchronous blocking `socket.getaddrinfo()` on line 127 runs directly inside async request flows.
+- **Impact:** DNS latency stalls the entire Python `asyncio` event loop for concurrent requests.
+- **Remedy:** Wrap in `await asyncio.to_thread(socket.getaddrinfo, ...)`.
 
 ### Stage 4: Scraping & HTML Text Extraction (`extractor.py`)
-* **Defect 1:** Arbitrary `len(t) >= 30` filter discards critical hero slogans, value propositions, and pricing bullet points.
-* **Defect 2:** Discards `<meta name="description">` and `og:description`, which are often the highest-density descriptions of commercial offerings.
-* **Remedy:** Lower leaf node filter to 15 characters, and extract meta/OG tags into the page content.
+
+- **Defect 1:** Arbitrary `len(t) >= 30` filter discards critical hero slogans, value propositions, and pricing bullet points.
+- **Defect 2:** Discards `<meta name="description">` and `og:description`, which are often the highest-density descriptions of commercial offerings.
+- **Remedy:** Lower leaf node filter to 15 characters, and extract meta/OG tags into the page content.
 
 ### Stage 5: Content Chunking & Relevance Ranking (`ranker.py`)
-* **Defect:** Fixed `top_k=6` ranking with 300–600 char chunks, combined with down-stream slicing to 3 chunks.
-* **Impact:** Business model context is fragmented; quotes spanning chunk boundaries fail verbatim matching.
-* **Remedy:** Allow chunk windows of 800–1,000 characters and pass top 5–6 chunks to LLM synthesis.
+
+- **Defect:** Fixed `top_k=6` ranking with 300–600 char chunks, combined with down-stream slicing to 3 chunks.
+- **Impact:** Business model context is fragmented; quotes spanning chunk boundaries fail verbatim matching.
+- **Remedy:** Allow chunk windows of 800–1,000 characters and pass top 5–6 chunks to LLM synthesis.
 
 ### Stage 6: LLM Synthesis & Evidence Grounding (`evidence.py`)
-* **Defect 1:** Strict string equality in `_verify_and_clean_citations`.
-* **Defect 2:** Unicode variations (smart quotes `’`, em dashes `—`, non-breaking spaces `\xa0`) cause quote check failures.
-* **Remedy:** Normalize unicode and punctuation before substring matching; allow 85%+ token overlap matching.
+
+- **Defect 1:** Strict string equality in `_verify_and_clean_citations`.
+- **Defect 2:** Unicode variations (smart quotes `’`, em dashes `—`, non-breaking spaces `\xa0`) cause quote check failures.
+- **Remedy:** Normalize unicode and punctuation before substring matching; allow 85%+ token overlap matching.
 
 ---
 
@@ -317,9 +330,9 @@ def _normalize_text(text: str) -> str:
 ## Summary
 
 Implementing these changes eliminates false `"no json output"` and `"not enough public evidence"` failures by:
+
 1. Guaranteeing search fallback when targeted domain scraping fails.
 2. Passing sufficient context (1,500+ tokens) to the LLM.
 3. Accepting standard boolean JSON values.
 4. Correcting search relevance filtering for short, acronym, and legal entity names.
 5. Making citation verification robust against unicode and formatting variations.
-
