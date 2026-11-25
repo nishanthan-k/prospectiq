@@ -199,6 +199,75 @@ async def test_call_llm_records_parse_error_on_malformed_arguments():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bad_args", ["", "   ", "\n\t"])
+async def test_call_llm_empty_and_whitespace_arguments_treated_as_malformed(bad_args: str):
+    """Empty or whitespace-only argument strings are flagged as malformed JSON."""
+    raw_tc = MagicMock()
+    raw_tc.id = "call_empty_str"
+    raw_tc.function = MagicMock()
+    raw_tc.function.name = "search_company"
+    raw_tc.function.arguments = bad_args
+
+    mock_choice = MagicMock()
+    mock_choice.finish_reason = "tool_calls"
+    mock_choice.message = MagicMock()
+    mock_choice.message.content = None
+    mock_choice.message.tool_calls = [raw_tc]
+
+    mock_resp = MagicMock()
+    mock_resp.choices = [mock_choice]
+    mock_resp.usage = MagicMock(prompt_tokens=20, completion_tokens=10, total_tokens=30)
+
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create = AsyncMock(return_value=mock_resp)
+
+    req = LLMRequest(
+        prompt="Find Stripe",
+        tools=[{"type": "function", "function": {"name": "search_company"}}],
+    )
+    resp = await call_llm(req, client=mock_client)
+
+    assert len(resp.tool_calls) == 1
+    tc = resp.tool_calls[0]
+    assert tc.parse_error is not None
+    assert "empty or whitespace-only" in tc.parse_error
+
+
+@pytest.mark.asyncio
+async def test_call_llm_valid_empty_json_object_succeeds():
+    """Valid '{}' JSON object parses with parse_error=None and arguments={}."""
+    raw_tc = MagicMock()
+    raw_tc.id = "call_valid_empty_obj"
+    raw_tc.function = MagicMock()
+    raw_tc.function.name = "ping_tool"
+    raw_tc.function.arguments = "{}"
+
+    mock_choice = MagicMock()
+    mock_choice.finish_reason = "tool_calls"
+    mock_choice.message = MagicMock()
+    mock_choice.message.content = None
+    mock_choice.message.tool_calls = [raw_tc]
+
+    mock_resp = MagicMock()
+    mock_resp.choices = [mock_choice]
+    mock_resp.usage = MagicMock(prompt_tokens=20, completion_tokens=10, total_tokens=30)
+
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create = AsyncMock(return_value=mock_resp)
+
+    req = LLMRequest(
+        prompt="Ping",
+        tools=[{"type": "function", "function": {"name": "ping_tool"}}],
+    )
+    resp = await call_llm(req, client=mock_client)
+
+    assert len(resp.tool_calls) == 1
+    tc = resp.tool_calls[0]
+    assert tc.parse_error is None
+    assert tc.arguments == {}
+
+
+@pytest.mark.asyncio
 async def test_call_llm_forwards_tools_and_tool_choice():
     """call_llm forwards tools and tool_choice parameters to completions create."""
     mock_choice = MagicMock()

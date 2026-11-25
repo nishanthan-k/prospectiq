@@ -46,9 +46,20 @@ class AgentRunner:
     ) -> None:
         self.registry = registry or get_default_registry()
         self.model = model or settings.default_model
-        self.per_tool_timeout = per_tool_timeout
 
-        if not isinstance(max_steps, int) or not (1 <= max_steps <= 20):
+        if (
+            isinstance(per_tool_timeout, bool)
+            or not isinstance(per_tool_timeout, (int, float))
+            or per_tool_timeout <= 0
+        ):
+            raise ValueError(f"per_tool_timeout must be > 0 (got {per_tool_timeout})")
+        self.per_tool_timeout = float(per_tool_timeout)
+
+        if (
+            isinstance(max_steps, bool)
+            or not isinstance(max_steps, int)
+            or not (1 <= max_steps <= 20)
+        ):
             raise ValueError(f"max_steps must be an integer between 1 and 20 (got {max_steps})")
         self.max_steps = max_steps
 
@@ -60,7 +71,22 @@ class AgentRunner:
                     )
         self.allowed_tools = allowed_tools
 
+        if (
+            isinstance(max_tool_calls_per_turn, bool)
+            or not isinstance(max_tool_calls_per_turn, int)
+            or max_tool_calls_per_turn < 1
+        ):
+            raise ValueError(
+                f"max_tool_calls_per_turn must be an integer >= 1 (got {max_tool_calls_per_turn})"
+            )
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
+
+        if (
+            isinstance(max_concurrency, bool)
+            or not isinstance(max_concurrency, int)
+            or max_concurrency < 1
+        ):
+            raise ValueError(f"max_concurrency must be an integer >= 1 (got {max_concurrency})")
         self.max_concurrency = max_concurrency
         self.authorized_permission_level = authorized_permission_level
 

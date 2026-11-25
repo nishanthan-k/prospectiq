@@ -512,6 +512,7 @@ async def call_llm(
             if isinstance(raw_args, str):
                 trimmed = raw_args.strip()
                 if not trimmed:
+                    parse_error = "Malformed JSON arguments: empty or whitespace-only string"
                     parsed_args = {}
                 else:
                     parsed_args = _safe_parse_json(trimmed)
