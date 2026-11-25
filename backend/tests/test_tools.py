@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from app.agent.tools.base import BaseTool, ToolOutput, ToolPermissionLevel
 from app.agent.tools.definitions import (
+    EvaluateLeadFitInput,
     EvaluateLeadFitTool,
     FetchWebpageTool,
     SearchCompanyTool,
@@ -85,11 +86,12 @@ async def test_base_tool_timeout_enforcement():
 
 @pytest.mark.asyncio
 async def test_base_tool_exception_containment():
-    """run_with_guard catches unhandled tool exceptions and returns clean error string."""
+    """run_with_guard catches unhandled tool exceptions and returns sanitized error string."""
     tool = DummyTool()
     out = await tool.run_with_guard({"query": "fail"})
     assert out.success is False
-    assert "Database connection lost" in (out.error or "")
+    assert "encountered an execution error" in (out.error or "")
+    assert "Database connection lost" not in (out.error or "")  # Raw exception not leaked
 
 
 @pytest.mark.asyncio
@@ -141,14 +143,14 @@ async def test_fetch_webpage_tool_with_budget_guard():
 
 @pytest.mark.asyncio
 async def test_fetch_webpage_tool_handles_failed_page():
-    """FetchWebpageTool handles None return from extract_page (SSRF or HTTP block) safely."""
+    """FetchWebpageTool returns failed ToolOutput on None return from extract_page."""
     with patch("app.agent.tools.definitions.extract_page", new=AsyncMock(return_value=None)):
         tool = FetchWebpageTool()
         out = await tool.run_with_guard({"url": "http://169.254.169.254/latest"})
 
-    assert out.success is True
+    assert out.success is False
     assert out.data["status"] == "failed"
-    assert "Unable to access webpage" in out.data["content"]
+    assert "Unable to access webpage" in (out.error or "")
 
 
 @pytest.mark.asyncio
@@ -222,3 +224,81 @@ def test_get_default_registry():
     assert reg.has("fetch_webpage") is True
     assert reg.has("evaluate_lead_fit") is True
     assert len(reg.list_tools()) >= 3
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_permission_enforcement():
+    """execute_tool rejects write_action tools unless authorized_permission_level is WRITE_ACTION."""
+    reg = ToolRegistry()
+    write_tool = DummyTool()
+    write_tool.name = "write_tool"
+    write_tool.permission_level = ToolPermissionLevel.WRITE_ACTION
+    reg.register(write_tool)
+
+    # Denied with READ_ONLY
+    out = await reg.execute_tool(
+        "write_tool",
+        {"query": "data"},
+        authorized_permission_level=ToolPermissionLevel.READ_ONLY,
+    )
+    assert out.success is False
+    assert "Permission denied" in (out.error or "")
+
+    # Allowed with WRITE_ACTION
+    out_ok = await reg.execute_tool(
+        "write_tool",
+        {"query": "data"},
+        authorized_permission_level=ToolPermissionLevel.WRITE_ACTION,
+    )
+    assert out_ok.success is True
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_approval_enforcement():
+    """execute_tool rejects tools requiring approval unless is_approved is True."""
+    reg = ToolRegistry()
+    approval_tool = DummyTool()
+    approval_tool.name = "approval_tool"
+    approval_tool.requires_approval = True
+    reg.register(approval_tool)
+
+    # Rejected without approval
+    out = await reg.execute_tool("approval_tool", {"query": "data"}, is_approved=False)
+    assert out.success is False
+    assert "Approval required" in (out.error or "")
+
+    # Allowed with approval
+    out_ok = await reg.execute_tool("approval_tool", {"query": "data"}, is_approved=True)
+    assert out_ok.success is True
+
+
+@pytest.mark.asyncio
+async def test_evaluate_lead_fit_tokenless_criteria_never_auto_matches():
+    """Tokenless or punctuation-only criteria never auto-match."""
+    tool = EvaluateLeadFitTool()
+    out = await tool.run_with_guard(
+        {
+            "company_name": "TestCorp",
+            "offerings_summary": "We sell ergonomic office chairs and standing desks.",
+            "target_criteria": ["... --- ???", "ergonomic office chairs"],
+        }
+    )
+    assert out.success is True
+    data = out.data
+    assert "... --- ???" in data["unmatched_criteria"]
+    assert "... --- ???" not in data["matched_criteria"]
+    assert "ergonomic office chairs" in data["matched_criteria"]
+
+
+def test_evaluate_lead_fit_rejects_blank_inputs():
+    """EvaluateLeadFitInput raises ValidationError on blank company, summary, or criteria."""
+    with pytest.raises(ValueError, match="Field cannot be empty"):
+        EvaluateLeadFitInput(company_name="   ", offerings_summary="valid summary")
+
+    with pytest.raises(ValueError, match="Field cannot be empty"):
+        EvaluateLeadFitInput(company_name="Acme", offerings_summary="   ")
+
+    with pytest.raises(ValueError, match="target_criteria cannot be empty"):
+        EvaluateLeadFitInput(
+            company_name="Acme", offerings_summary="Valid", target_criteria=["   ", ""]
+        )

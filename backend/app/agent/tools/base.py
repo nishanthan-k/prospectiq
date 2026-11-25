@@ -75,6 +75,8 @@ class BaseTool(ABC):
                 self.execute(**validated_args.model_dump()),
                 timeout=timeout_seconds,
             )
+            if isinstance(data, ToolOutput):
+                return data
             return ToolOutput(success=True, data=data, error=None)
         except (TimeoutError, asyncio.TimeoutError):
             log.warning(f"Tool [{self.name}] execution timed out after {timeout_seconds}s")
@@ -84,9 +86,9 @@ class BaseTool(ABC):
                 error=f"Tool '{self.name}' timed out after {timeout_seconds}s",
             )
         except Exception as exc:
-            log.warning(f"Tool [{self.name}] execution failed with error: {exc}")
+            log.exception(f"Tool [{self.name}] execution failed unexpectedly: {exc}")
             return ToolOutput(
                 success=False,
                 data=None,
-                error=f"Tool '{self.name}' execution failed: {exc}",
+                error=f"Tool '{self.name}' encountered an execution error. Please verify input parameters or try an alternative approach.",
             )

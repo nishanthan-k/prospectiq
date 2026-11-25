@@ -3,7 +3,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.agent.tools.base import BaseTool, ToolPermissionLevel
+from app.agent.tools.base import BaseTool, ToolOutput, ToolPermissionLevel
 from app.core.logger import log
 from app.research.extractor import extract_page
 from app.research.search import search_company
@@ -90,15 +90,19 @@ class FetchWebpageTool(BaseTool):
     args_schema = FetchWebpageInput
     permission_level = ToolPermissionLevel.READ_ONLY
 
-    async def execute(self, url: str) -> dict[str, Any]:
+    async def execute(self, url: str) -> Any:
         log.info(f"Executing fetch_webpage: url='{url}'")
         page = await extract_page(url=url)
         if not page:
-            return {
-                "url": url,
-                "status": "failed",
-                "content": "Unable to access webpage. The target was either blocked by SSRF checks, returned a non-200 status, or yielded no extractable text.",
-            }
+            log.warning(f"Failed to extract content from webpage: url='{url}'")
+            return ToolOutput(
+                success=False,
+                data={"url": url, "status": "failed"},
+                error=(
+                    f"Unable to access webpage '{url}'. The target was either blocked by SSRF checks, "
+                    f"returned a non-200 status, or yielded no extractable text."
+                ),
+            )
 
         # Context Budget Guard: Limit tool response to 1,200–1,500 chars max
         # Combine title and top high-density chunks
@@ -150,6 +154,23 @@ class EvaluateLeadFitInput(BaseModel):
         description="Optional qualification criteria to test against. Defaults to platform ICP criteria if omitted.",
     )
 
+    @field_validator("company_name", "offerings_summary")
+    @classmethod
+    def validate_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Field cannot be empty or only whitespace")
+        return v.strip()
+
+    @field_validator("target_criteria")
+    @classmethod
+    def validate_target_criteria(cls, v: Optional[list[str]]) -> Optional[list[str]]:
+        if v is not None:
+            cleaned = [c.strip() for c in v if c and c.strip()]
+            if not cleaned:
+                raise ValueError("target_criteria cannot be empty or contain only blank items")
+            return cleaned
+        return v
+
 
 class EvaluateLeadFitTool(BaseTool):
     """Tool for evaluating target company qualification against sales qualification criteria."""
@@ -168,7 +189,11 @@ class EvaluateLeadFitTool(BaseTool):
         offerings_summary: str,
         target_criteria: Optional[list[str]] = None,
     ) -> dict[str, Any]:
-        criteria = target_criteria or DEFAULT_PLATFORM_ICP_CRITERIA
+        raw_criteria = target_criteria or DEFAULT_PLATFORM_ICP_CRITERIA
+        criteria = [c.strip() for c in raw_criteria if c and c.strip()]
+        if not criteria:
+            criteria = DEFAULT_PLATFORM_ICP_CRITERIA
+
         log.info(
             f"Executing evaluate_lead_fit for '{company_name}' against {len(criteria)} criteria"
         )
@@ -185,7 +210,7 @@ class EvaluateLeadFitTool(BaseTool):
             if len(subclauses) > 1:
                 for sub in subclauses:
                     sub_clean = re.sub(r"[^\w\s]", " ", sub)
-                    tokens = [t for t in sub_clean.split() if len(t) >= 3]
+                    tokens = [t for t in sub_clean.split() if len(t) >= 2]
                     if not tokens:
                         continue
                     matches = sum(
@@ -198,9 +223,10 @@ class EvaluateLeadFitTool(BaseTool):
 
             if not criterion_matched:
                 crit_clean = re.sub(r"[^\w\s]", " ", crit_lower)
-                tokens = [t for t in crit_clean.split() if len(t) >= 3]
+                tokens = [t for t in crit_clean.split() if len(t) >= 2]
                 if not tokens:
-                    criterion_matched = True
+                    # Tokenless criteria must never auto-match
+                    criterion_matched = False
                 else:
                     matches = sum(
                         1 for t in tokens if re.search(rf"\b{re.escape(t)}\b", summary_lower)
@@ -243,7 +269,7 @@ class EvaluateLeadFitTool(BaseTool):
             "unmatched_criteria": unmatched_criteria,
             "proposal_hooks": proposal_hooks,
             "evaluation_note": (
-                f"{company_name} meets {len(matched_criteria)}/{total_criteria} target criteria "
-                f"(fit score: {fit_score * 100:.0f}%, status: {status})."
+                f"Lexical heuristic evaluation: {company_name} matches {len(matched_criteria)}/{total_criteria} "
+                f"target criteria (fit score: {fit_score * 100:.0f}%, status: {status})."
             ),
         }

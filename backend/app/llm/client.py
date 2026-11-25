@@ -41,6 +41,14 @@ class ToolCallPayload(BaseModel):
         default_factory=dict,
         description="Parsed JSON arguments for the tool",
     )
+    raw_arguments: Optional[str] = Field(
+        default=None,
+        description="Raw arguments payload string as received from model",
+    )
+    parse_error: Optional[str] = Field(
+        default=None,
+        description="Parsing error message if arguments were malformed JSON",
+    )
     extra_content: Optional[dict[str, Any]] = Field(
         default=None,
         description="Provider-specific extra content (e.g. Google Gemini thought_signature)",
@@ -499,9 +507,21 @@ async def call_llm(
             if not isinstance(extra_content, dict):
                 extra_content = None
 
-            # Resilient argument parsing using _safe_parse_json
-            parsed_args = _safe_parse_json(raw_args) if isinstance(raw_args, str) else raw_args
-            if not isinstance(parsed_args, dict):
+            raw_args_str = raw_args if isinstance(raw_args, str) else json.dumps(raw_args)
+            parse_error: Optional[str] = None
+            if isinstance(raw_args, str):
+                trimmed = raw_args.strip()
+                if not trimmed:
+                    parsed_args = {}
+                else:
+                    parsed_args = _safe_parse_json(trimmed)
+                    if parsed_args is None or not isinstance(parsed_args, dict):
+                        parse_error = f"Malformed JSON arguments: {trimmed[:100]}"
+                        parsed_args = {}
+            elif isinstance(raw_args, dict):
+                parsed_args = raw_args
+            else:
+                parse_error = f"Invalid arguments format of type: {type(raw_args).__name__}"
                 parsed_args = {}
 
             parsed_tool_calls.append(
@@ -509,6 +529,8 @@ async def call_llm(
                     id=tc_id,
                     name=fn_name,
                     arguments=parsed_args,
+                    raw_arguments=raw_args_str,
+                    parse_error=parse_error,
                     extra_content=extra_content,
                 )
             )

@@ -4,7 +4,7 @@ import time
 from typing import Any, Optional
 
 from app.agent.models import AgentRunResult, ToolCallRecord
-from app.agent.tools.base import ToolOutput
+from app.agent.tools.base import ToolOutput, ToolPermissionLevel
 from app.agent.tools.registry import ToolRegistry, get_default_registry
 from app.core.config import get_settings
 from app.core.logger import log
@@ -29,7 +29,8 @@ OPERATING PRINCIPLES:
 class AgentRunner:
     """
     Autonomous multi-turn agent execution loop with deterministic tool calling,
-    parallel execution, loop guards, cycle detection, and forced synthesis.
+    bounded parallel execution, concurrency limits, loop guards, cycle detection,
+    and forced synthesis.
     """
 
     def __init__(
@@ -39,12 +40,29 @@ class AgentRunner:
         per_tool_timeout: float = 10.0,
         max_steps: int = 6,
         allowed_tools: Optional[list[str]] = None,
+        max_tool_calls_per_turn: int = 5,
+        max_concurrency: int = 3,
+        authorized_permission_level: ToolPermissionLevel = ToolPermissionLevel.READ_ONLY,
     ) -> None:
         self.registry = registry or get_default_registry()
         self.model = model or settings.default_model
         self.per_tool_timeout = per_tool_timeout
+
+        if not isinstance(max_steps, int) or not (1 <= max_steps <= 20):
+            raise ValueError(f"max_steps must be an integer between 1 and 20 (got {max_steps})")
         self.max_steps = max_steps
+
+        if allowed_tools is not None:
+            for tool_name in allowed_tools:
+                if not self.registry.has(tool_name):
+                    raise ValueError(
+                        f"Unknown tool in allowed_tools: '{tool_name}' is not registered."
+                    )
         self.allowed_tools = allowed_tools
+
+        self.max_tool_calls_per_turn = max_tool_calls_per_turn
+        self.max_concurrency = max_concurrency
+        self.authorized_permission_level = authorized_permission_level
 
     async def run(
         self,
@@ -60,7 +78,24 @@ class AgentRunner:
         Execute the autonomous agent loop until the objective is satisfied
         or the max_steps ceiling is reached.
         """
+        # 1. Internal validation of inputs
+        if not goal or not goal.strip():
+            raise ValueError("goal cannot be empty or only whitespace")
+
         effective_max_steps = max_steps if max_steps is not None else self.max_steps
+        if not isinstance(effective_max_steps, int) or not (1 <= effective_max_steps <= 20):
+            raise ValueError(
+                f"max_steps must be an integer between 1 and 20 (got {effective_max_steps})"
+            )
+
+        effective_allowed = allowed_tools if allowed_tools is not None else self.allowed_tools
+        if effective_allowed is not None:
+            for tool_name in effective_allowed:
+                if not self.registry.has(tool_name):
+                    raise ValueError(
+                        f"Unknown tool in allowed_tools: '{tool_name}' is not registered."
+                    )
+
         start_time = time.perf_counter()
         req_id = request_id or f"agt_{int(start_time * 1000)}"
 
@@ -69,8 +104,8 @@ class AgentRunner:
             f"company='{company_name}', domain='{domain}', max_steps={effective_max_steps}"
         )
 
-        # 1. Build initial conversation message history
-        initial_user_prompt = f"Goal: {goal}"
+        # 2. Build initial conversation message history
+        initial_user_prompt = f"Goal: {goal.strip()}"
         if company_name:
             initial_user_prompt += f"\nTarget Company: {company_name}"
         if domain:
@@ -86,10 +121,12 @@ class AgentRunner:
         tool_call_trace: list[ToolCallRecord] = []
         call_signatures: list[str] = []
         total_tokens = 0
-        effective_allowed = allowed_tools if allowed_tools is not None else self.allowed_tools
         openai_tools = self.registry.get_openai_tools(allowed_names=effective_allowed)
 
-        # 2. Multi-turn execution loop
+        # Semaphore to bound parallel tool concurrency
+        semaphore = asyncio.Semaphore(self.max_concurrency)
+
+        # 3. Multi-turn execution loop
         for step in range(effective_max_steps):
             log.info(f"[{req_id}] Agent step {step + 1}/{effective_max_steps} started")
 
@@ -109,13 +146,38 @@ class AgentRunner:
 
             # Case A: Model emitted final answer (no tool calls)
             if not resp.tool_calls:
+                clean_content = (resp.content or "").strip()
+                if not clean_content:
+                    log.warning(
+                        f"[{req_id}] Model returned empty content without tool calls at step {step + 1}."
+                    )
+                    # Controlled retry if steps remain
+                    if step < effective_max_steps - 1:
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": "Your previous response was empty. Please provide your findings or invoke an appropriate tool.",
+                            }
+                        )
+                        continue
+                    else:
+                        latency_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
+                        return AgentRunResult(
+                            final_answer="Agent failed to produce a final answer (received empty response).",
+                            steps_taken=step + 1,
+                            is_completed=False,
+                            tool_calls=tool_call_trace,
+                            total_tokens=total_tokens,
+                            latency_ms=latency_ms,
+                        )
+
                 latency_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
                 log.info(
                     f"[{req_id}] Agent satisfied goal at step {step + 1} "
                     f"(latency={latency_ms:.0f}ms, total_tokens={total_tokens})"
                 )
                 return AgentRunResult(
-                    final_answer=resp.content,
+                    final_answer=clean_content,
                     steps_taken=step + 1,
                     is_completed=True,
                     tool_calls=tool_call_trace,
@@ -163,20 +225,59 @@ class AgentRunner:
                     f"Identical tool call repeated. Injecting breaker directive."
                 )
 
-            # 3. Parallel execute all tool calls via asyncio.gather
+            # 3. Parallel execute tool calls with concurrency and bounds guards
             async def _exec_single(
+                idx: int,
                 tc: ToolCallPayload,
             ) -> tuple[ToolCallPayload, ToolOutput, float]:
+                # Enforce maximum tool calls per turn
+                if idx >= self.max_tool_calls_per_turn:
+                    log.warning(
+                        f"[{req_id}] Rejecting tool call {idx + 1} ('{tc.name}'): "
+                        f"exceeded max_tool_calls_per_turn ({self.max_tool_calls_per_turn})"
+                    )
+                    return (
+                        tc,
+                        ToolOutput(
+                            success=False,
+                            data=None,
+                            error=(
+                                f"Tool execution rejected: exceeded maximum allowable tool calls "
+                                f"per turn ({self.max_tool_calls_per_turn})."
+                            ),
+                        ),
+                        0.0,
+                    )
+
+                # Reject malformed JSON arguments explicitly before execution
+                if tc.parse_error:
+                    log.warning(
+                        f"[{req_id}] Tool '{tc.name}' received malformed arguments: {tc.parse_error}"
+                    )
+                    return (
+                        tc,
+                        ToolOutput(
+                            success=False,
+                            data=None,
+                            error=f"Malformed tool call arguments: {tc.parse_error}",
+                        ),
+                        0.0,
+                    )
+
                 t0 = time.perf_counter()
-                out = await self.registry.execute_tool(
-                    name=tc.name,
-                    args=tc.arguments,
-                    timeout_seconds=self.per_tool_timeout,
-                )
+                async with semaphore:
+                    out = await self.registry.execute_tool(
+                        name=tc.name,
+                        args=tc.arguments,
+                        timeout_seconds=self.per_tool_timeout,
+                        authorized_permission_level=self.authorized_permission_level,
+                    )
                 dur_ms = round((time.perf_counter() - t0) * 1000.0, 2)
                 return tc, out, dur_ms
 
-            tool_results = await asyncio.gather(*[_exec_single(tc) for tc in resp.tool_calls])
+            tool_results = await asyncio.gather(
+                *[_exec_single(idx, tc) for idx, tc in enumerate(resp.tool_calls)]
+            )
 
             # 4. Append ALL tool responses in 1:1 pairing matching their tool_call_id
             for tc, out, dur_ms in tool_results:
@@ -218,7 +319,7 @@ class AgentRunner:
                     )
                 )
 
-        # 3. Forced Final Synthesis Turn if max_steps reached without final text
+        # 4. Forced Final Synthesis Turn if max_steps reached without final text
         log.warning(
             f"[{req_id}] Reached max_steps ({effective_max_steps}) without final answer. "
             f"Triggering forced final synthesis turn."
@@ -248,8 +349,12 @@ class AgentRunner:
         total_tokens += synth_resp.total_tokens
         latency_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
 
+        clean_synth = (synth_resp.content or "").strip()
+        if not clean_synth:
+            clean_synth = "Agent forced synthesis produced an empty response."
+
         return AgentRunResult(
-            final_answer=synth_resp.content,
+            final_answer=clean_synth,
             steps_taken=effective_max_steps + 1,
             is_completed=False,  # Max steps ceiling was reached
             tool_calls=tool_call_trace,

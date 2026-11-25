@@ -161,7 +161,10 @@ def _evaluate_text_against_icp(
     Deterministic fallback evaluator when no evaluate_lead_fit tool was triggered.
     Scores text against default platform ICP criteria.
     """
-    target_criteria = criteria or DEFAULT_PLATFORM_ICP_CRITERIA
+    raw_criteria = criteria or DEFAULT_PLATFORM_ICP_CRITERIA
+    target_criteria = [c.strip() for c in raw_criteria if c and c.strip()]
+    if not target_criteria:
+        target_criteria = DEFAULT_PLATFORM_ICP_CRITERIA
     summary_lower = text.lower()
     matched: list[str] = []
     unmatched: list[str] = []
@@ -174,7 +177,7 @@ def _evaluate_text_against_icp(
         if len(subclauses) > 1:
             for sub in subclauses:
                 sub_clean = re.sub(r"[^\w\s]", " ", sub)
-                tokens = [t for t in sub_clean.split() if len(t) >= 3]
+                tokens = [t for t in sub_clean.split() if len(t) >= 2]
                 if not tokens:
                     continue
                 matches = sum(1 for t in tokens if re.search(rf"\b{re.escape(t)}\b", summary_lower))
@@ -185,9 +188,9 @@ def _evaluate_text_against_icp(
 
         if not criterion_matched:
             crit_clean = re.sub(r"[^\w\s]", " ", crit_lower)
-            tokens = [t for t in crit_clean.split() if len(t) >= 3]
+            tokens = [t for t in crit_clean.split() if len(t) >= 2]
             if not tokens:
-                criterion_matched = True
+                criterion_matched = False
             else:
                 matches = sum(1 for t in tokens if re.search(rf"\b{re.escape(t)}\b", summary_lower))
                 if matches / len(tokens) >= 0.4:
