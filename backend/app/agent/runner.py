@@ -31,6 +31,15 @@ class AgentRunner:
     Autonomous multi-turn agent execution loop with deterministic tool calling,
     bounded parallel execution, concurrency limits, loop guards, cycle detection,
     and forced synthesis.
+
+    Note (Level 3 Approval & Permission Limitation):
+        `ToolRegistry.execute_tool()` enforces both permission levels and
+        `requires_approval` checks. Currently, `AgentRunner` passes
+        `authorized_permission_level` (defaulting to `READ_ONLY`) but does not
+        grant `is_approved=True` or filter `get_openai_tools()` schemas by
+        permission level. Approval-required / write tools are safely rejected at
+        execution time; full Human-in-the-Loop (HITL) approval pause/resume is
+        deferred to Level 5 (Durable Workflows).
     """
 
     def __init__(
