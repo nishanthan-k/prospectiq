@@ -32,14 +32,14 @@ class AgentRunner:
     bounded parallel execution, concurrency limits, loop guards, cycle detection,
     and forced synthesis.
 
-    Note (Level 3 Approval & Permission Limitation):
+    Note (Level 3 Approval Limitation):
         `ToolRegistry.execute_tool()` enforces both permission levels and
-        `requires_approval` checks. Currently, `AgentRunner` passes
-        `authorized_permission_level` (defaulting to `READ_ONLY`) but does not
-        grant `is_approved=True` or filter `get_openai_tools()` schemas by
-        permission level. Approval-required / write tools are safely rejected at
-        execution time; full Human-in-the-Loop (HITL) approval pause/resume is
-        deferred to Level 5 (Durable Workflows).
+        `requires_approval` checks, and `AgentRunner` filters advertised tool
+        schemas according to `authorized_permission_level` (defaulting to
+        `READ_ONLY`). However, `AgentRunner` does not grant `is_approved=True`;
+        approval-required tools are safely rejected at execution time, and full
+        Human-in-the-Loop (HITL) approval pause/resume is deferred to Level 5
+        (Durable Workflows).
     """
 
     def __init__(
@@ -118,7 +118,11 @@ class AgentRunner:
             raise ValueError("goal cannot be empty or only whitespace")
 
         effective_max_steps = max_steps if max_steps is not None else self.max_steps
-        if not isinstance(effective_max_steps, int) or not (1 <= effective_max_steps <= 20):
+        if (
+            isinstance(effective_max_steps, bool)
+            or not isinstance(effective_max_steps, int)
+            or not (1 <= effective_max_steps <= 20)
+        ):
             raise ValueError(
                 f"max_steps must be an integer between 1 and 20 (got {effective_max_steps})"
             )
@@ -156,7 +160,15 @@ class AgentRunner:
         tool_call_trace: list[ToolCallRecord] = []
         call_signatures: list[str] = []
         total_tokens = 0
-        openai_tools = self.registry.get_openai_tools(allowed_names=effective_allowed)
+        permission_filter = (
+            ToolPermissionLevel.READ_ONLY
+            if self.authorized_permission_level == ToolPermissionLevel.READ_ONLY
+            else None
+        )
+        openai_tools = self.registry.get_openai_tools(
+            allowed_names=effective_allowed,
+            permission_filter=permission_filter,
+        )
 
         # Semaphore to bound parallel tool concurrency
         semaphore = asyncio.Semaphore(self.max_concurrency)

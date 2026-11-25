@@ -445,6 +445,9 @@ async def test_agent_runner_validates_inputs():
     with pytest.raises(ValueError, match="max_steps must be an integer between 1 and 20"):
         await runner.run(goal="Valid goal", max_steps=25)
 
+    with pytest.raises(ValueError, match="max_steps must be an integer between 1 and 20"):
+        await runner.run(goal="Valid goal", max_steps=True)  # type: ignore[arg-type]
+
     # Unknown tool in allowed_tools
     with pytest.raises(ValueError, match="Unknown tool in allowed_tools: 'fake_tool'"):
         await runner.run(goal="Valid goal", allowed_tools=["fake_tool"])
@@ -452,6 +455,9 @@ async def test_agent_runner_validates_inputs():
     # Constructor validation
     with pytest.raises(ValueError, match="max_steps must be an integer between 1 and 20"):
         AgentRunner(max_steps=0)
+
+    with pytest.raises(ValueError, match="max_steps must be an integer between 1 and 20"):
+        AgentRunner(max_steps=True)  # type: ignore[arg-type]
 
     with pytest.raises(ValueError, match="Unknown tool in allowed_tools"):
         AgentRunner(allowed_tools=["unknown_tool"])
@@ -628,3 +634,59 @@ def test_fallback_icp_tokenless_criteria_never_auto_matches():
     assert verdict_zero.fit_score == 0.0
     assert verdict_zero.is_fit is False
     assert verdict_zero.status == "DISQUALIFIED"
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_filters_advertised_schemas_by_permission():
+    """READ_ONLY runner omits WRITE_ACTION tools from LLM schemas; WRITE_ACTION runner includes all."""
+
+    class SimpleArgs(BaseModel):
+        q: str
+
+    class ReadTool(BaseTool):
+        name = "read_info"
+        description = "Read info"
+        args_schema = SimpleArgs
+        permission_level = ToolPermissionLevel.READ_ONLY
+
+        async def execute(self, q: str) -> dict[str, str]:
+            return {"q": q}
+
+    class WriteTool(BaseTool):
+        name = "write_info"
+        description = "Write info"
+        args_schema = SimpleArgs
+        permission_level = ToolPermissionLevel.WRITE_ACTION
+
+        async def execute(self, q: str) -> dict[str, str]:
+            return {"q": q}
+
+    registry = ToolRegistry()
+    registry.register(ReadTool())
+    registry.register(WriteTool())
+
+    done_resp = LLMResponse(
+        request_id="res_schema",
+        content="Done.",
+        finish_reason="stop",
+    )
+
+    # 1. READ_ONLY runner advertises only read_info
+    ro_mock = AsyncMock(return_value=done_resp)
+    ro_runner = AgentRunner(registry=registry)
+    with patch("app.agent.runner.call_llm", new=ro_mock):
+        await ro_runner.run(goal="Check schemas")
+    ro_req = ro_mock.call_args.args[0]
+    ro_tool_names = [t["function"]["name"] for t in (ro_req.tools or [])]
+    assert ro_tool_names == ["read_info"]
+
+    # 2. WRITE_ACTION runner advertises both read_info and write_info
+    rw_mock = AsyncMock(return_value=done_resp)
+    rw_runner = AgentRunner(
+        registry=registry, authorized_permission_level=ToolPermissionLevel.WRITE_ACTION
+    )
+    with patch("app.agent.runner.call_llm", new=rw_mock):
+        await rw_runner.run(goal="Check schemas")
+    rw_req = rw_mock.call_args.args[0]
+    rw_tool_names = [t["function"]["name"] for t in (rw_req.tools or [])]
+    assert set(rw_tool_names) == {"read_info", "write_info"}
