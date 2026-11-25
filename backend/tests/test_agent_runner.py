@@ -1,9 +1,14 @@
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from pydantic import BaseModel
 
 from app.agent.models import AgentRunResult
 from app.agent.runner import AgentRunner
+from app.agent.service import _evaluate_text_against_icp
+from app.agent.tools.base import BaseTool, ToolPermissionLevel
+from app.agent.tools.registry import ToolRegistry
 from app.llm import LLMResponse, ToolCallPayload
 
 
@@ -313,12 +318,26 @@ async def test_agent_runner_malformed_arguments_rejected():
 @pytest.mark.asyncio
 async def test_agent_runner_valid_empty_json_arguments_succeeds():
     """Valid empty JSON arguments ({}) are distinguishable from malformed JSON and execute normally."""
-    runner = AgentRunner()
+
+    class EmptyArgs(BaseModel):
+        pass
+
+    class PingTool(BaseTool):
+        name = "ping_tool"
+        description = "No-argument ping tool"
+        args_schema = EmptyArgs
+
+        async def execute(self) -> dict[str, str]:
+            return {"pong": "ok"}
+
+    registry = ToolRegistry()
+    registry.register(PingTool())
+    runner = AgentRunner(registry=registry)
 
     valid_empty_tc = ToolCallPayload(
         id="call_valid_empty",
-        name="search_company",
-        arguments={"query": "fallback"},
+        name="ping_tool",
+        arguments={},
         parse_error=None,
     )
     turn1_resp = LLMResponse(
@@ -329,16 +348,17 @@ async def test_agent_runner_valid_empty_json_arguments_succeeds():
     )
     turn2_resp = LLMResponse(
         request_id="res_synth",
-        content="Success with valid args.",
+        content="Ping succeeded.",
         finish_reason="stop",
     )
 
     with patch("app.agent.runner.call_llm", side_effect=[turn1_resp, turn2_resp]):
-        with patch("app.agent.tools.definitions.search_company", new=AsyncMock(return_value=[])):
-            result = await runner.run(goal="Test valid args")
+        result = await runner.run(goal="Ping the tool")
 
     assert result.steps_taken == 2
+    assert len(result.tool_calls) == 1
     assert result.tool_calls[0].is_error is False
+    assert result.tool_calls[0].output == {"pong": "ok"}
 
 
 @pytest.mark.asyncio
@@ -454,3 +474,157 @@ async def test_agent_runner_empty_final_response_handled():
 
     assert result.is_completed is False
     assert "failed to produce a final answer" in result.final_answer
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_concurrency_bounded():
+    """AgentRunner enforces max_concurrency semaphore during parallel tool execution."""
+    active_count = 0
+    max_active_observed = 0
+
+    class SleepArgs(BaseModel):
+        idx: int
+
+    class SlowTool(BaseTool):
+        name = "slow_tool"
+        description = "Sleeps briefly to measure concurrent execution"
+        args_schema = SleepArgs
+
+        async def execute(self, idx: int) -> dict[str, int]:
+            nonlocal active_count, max_active_observed
+            active_count += 1
+            max_active_observed = max(max_active_observed, active_count)
+            try:
+                await asyncio.sleep(0.04)
+                return {"idx": idx}
+            finally:
+                active_count -= 1
+
+    registry = ToolRegistry()
+    registry.register(SlowTool())
+    runner = AgentRunner(registry=registry, max_concurrency=2, max_tool_calls_per_turn=5)
+
+    turn1_resp = LLMResponse(
+        request_id="res_conc",
+        content="",
+        finish_reason="tool_calls",
+        tool_calls=[
+            ToolCallPayload(id=f"c_{i}", name="slow_tool", arguments={"idx": i}) for i in range(4)
+        ],
+    )
+    turn2_resp = LLMResponse(
+        request_id="res_conc_done",
+        content="All slow tools completed.",
+        finish_reason="stop",
+    )
+
+    with patch("app.agent.runner.call_llm", side_effect=[turn1_resp, turn2_resp]):
+        result = await runner.run(goal="Test bounded concurrency")
+
+    assert len(result.tool_calls) == 4
+    assert all(not tc.is_error for tc in result.tool_calls)
+    assert max_active_observed == 2
+
+
+def test_agent_runner_invalid_configuration_rejected():
+    """AgentRunner validates max_concurrency, max_tool_calls_per_turn, and per_tool_timeout."""
+    with pytest.raises(ValueError, match="max_concurrency must be an integer >= 1"):
+        AgentRunner(max_concurrency=0)
+
+    with pytest.raises(ValueError, match="max_concurrency must be an integer >= 1"):
+        AgentRunner(max_concurrency=-2)
+
+    with pytest.raises(ValueError, match="max_tool_calls_per_turn must be an integer >= 1"):
+        AgentRunner(max_tool_calls_per_turn=0)
+
+    with pytest.raises(ValueError, match="max_tool_calls_per_turn must be an integer >= 1"):
+        AgentRunner(max_tool_calls_per_turn=-1)
+
+    with pytest.raises(ValueError, match="per_tool_timeout must be > 0"):
+        AgentRunner(per_tool_timeout=0)
+
+    with pytest.raises(ValueError, match="per_tool_timeout must be > 0"):
+        AgentRunner(per_tool_timeout=-1.5)
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_permission_enforcement():
+    """WRITE_ACTION tool cannot execute through AgentRunner without WRITE_ACTION authorization."""
+    executed_count = 0
+
+    class WriteArgs(BaseModel):
+        payload: str
+
+    class WriteTool(BaseTool):
+        name = "write_crm_note"
+        description = "Write a note to CRM"
+        args_schema = WriteArgs
+        permission_level = ToolPermissionLevel.WRITE_ACTION
+
+        async def execute(self, payload: str) -> dict[str, str]:
+            nonlocal executed_count
+            executed_count += 1
+            return {"saved": payload}
+
+    registry = ToolRegistry()
+    registry.register(WriteTool())
+
+    turn1_resp = LLMResponse(
+        request_id="res_perm_1",
+        content="",
+        finish_reason="tool_calls",
+        tool_calls=[
+            ToolCallPayload(
+                id="c_write",
+                name="write_crm_note",
+                arguments={"payload": "important"},
+            )
+        ],
+    )
+    turn2_resp = LLMResponse(
+        request_id="res_perm_2",
+        content="Done.",
+        finish_reason="stop",
+    )
+
+    # 1. Default READ_ONLY runner rejects write_action tool
+    ro_runner = AgentRunner(registry=registry)
+    with patch("app.agent.runner.call_llm", side_effect=[turn1_resp, turn2_resp]):
+        ro_result = await ro_runner.run(goal="Save note")
+
+    assert executed_count == 0
+    assert len(ro_result.tool_calls) == 1
+    assert ro_result.tool_calls[0].is_error is True
+    assert "Permission denied" in str(ro_result.tool_calls[0].output)
+
+    # 2. WRITE_ACTION authorized runner permits execution
+    rw_runner = AgentRunner(
+        registry=registry, authorized_permission_level=ToolPermissionLevel.WRITE_ACTION
+    )
+    with patch("app.agent.runner.call_llm", side_effect=[turn1_resp, turn2_resp]):
+        rw_result = await rw_runner.run(goal="Save note")
+
+    assert executed_count == 1
+    assert rw_result.tool_calls[0].is_error is False
+    assert rw_result.tool_calls[0].output == {"saved": "important"}
+
+
+def test_fallback_icp_tokenless_criteria_never_auto_matches():
+    """_evaluate_text_against_icp never auto-matches tokenless or punctuation-only criteria."""
+    verdict = _evaluate_text_against_icp(
+        text="We sell ergonomic chairs and standing desks.",
+        criteria=["... --- ???", "ergonomic chairs"],
+    )
+    assert "... --- ???" in verdict.unmatched_criteria
+    assert "... --- ???" not in verdict.matched_criteria
+    assert "ergonomic chairs" in verdict.matched_criteria
+    assert verdict.fit_score == 0.5
+
+    # Only tokenless criteria -> 0.0 score, DISQUALIFIED
+    verdict_zero = _evaluate_text_against_icp(
+        text="Some company summary.",
+        criteria=["---", "???"],
+    )
+    assert verdict_zero.fit_score == 0.0
+    assert verdict_zero.is_fit is False
+    assert verdict_zero.status == "DISQUALIFIED"
