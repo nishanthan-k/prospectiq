@@ -1,6 +1,6 @@
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, StrictInt, field_validator, model_validator
 
 from app.research.models import EvidenceCitation
 
@@ -73,7 +73,7 @@ class AgentInvestigateRequest(BaseModel):
         default=None, description="Target domain if known (e.g. 'retool.com')"
     )
     context: Optional[str] = Field(default=None, description="Optional CRM context or notes")
-    max_steps: int = Field(
+    max_steps: StrictInt = Field(
         default=4, ge=1, le=10, description="Maximum agent execution turns (1 to 10)"
     )
 
@@ -120,7 +120,7 @@ class AgentQualifyRequest(BaseModel):
         default=None, description="Target domain if known (e.g. 'retool.com')"
     )
     context: Optional[str] = Field(default=None, description="Optional CRM context or notes")
-    max_steps: int = Field(
+    max_steps: StrictInt = Field(
         default=4, ge=1, le=10, description="Maximum agent execution turns (1 to 10)"
     )
 
@@ -165,7 +165,7 @@ class AgentRunRequest(BaseModel):
     context: Optional[str] = Field(
         default=None, description="Optional CRM context or background notes"
     )
-    max_steps: int = Field(
+    max_steps: StrictInt = Field(
         default=6, ge=1, le=10, description="Maximum agent execution turns (1 to 10)"
     )
     allowed_tools: Optional[list[str]] = Field(
