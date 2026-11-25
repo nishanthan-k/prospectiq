@@ -161,6 +161,41 @@ async def test_call_llm_resilient_tool_arguments_parsing():
 
     assert len(resp.tool_calls) == 1
     assert resp.tool_calls[0].arguments == {"query": "Databricks", "max_results": 5}
+    assert resp.tool_calls[0].parse_error is None
+
+
+@pytest.mark.asyncio
+async def test_call_llm_records_parse_error_on_malformed_arguments():
+    """call_llm preserves parse_error on ToolCallPayload when tool arguments are unparseable."""
+    raw_tc = MagicMock()
+    raw_tc.id = "call_defect_unparseable"
+    raw_tc.function = MagicMock()
+    raw_tc.function.name = "search_company"
+    raw_tc.function.arguments = "INVALID_JSON_NOT_DICT {{{"
+
+    mock_choice = MagicMock()
+    mock_choice.finish_reason = "tool_calls"
+    mock_choice.message = MagicMock()
+    mock_choice.message.content = None
+    mock_choice.message.tool_calls = [raw_tc]
+
+    mock_resp = MagicMock()
+    mock_resp.choices = [mock_choice]
+    mock_resp.usage = MagicMock(prompt_tokens=30, completion_tokens=15, total_tokens=45)
+
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create = AsyncMock(return_value=mock_resp)
+
+    req = LLMRequest(
+        prompt="Find Databricks",
+        tools=[{"type": "function", "function": {"name": "search_company"}}],
+    )
+    resp = await call_llm(req, client=mock_client)
+
+    assert len(resp.tool_calls) == 1
+    tc = resp.tool_calls[0]
+    assert tc.parse_error is not None
+    assert "Malformed JSON arguments" in tc.parse_error
 
 
 @pytest.mark.asyncio

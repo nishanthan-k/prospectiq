@@ -61,9 +61,12 @@ class ToolRegistry:
         name: str,
         args: dict[str, Any],
         timeout_seconds: float = 10.0,
+        authorized_permission_level: ToolPermissionLevel = ToolPermissionLevel.READ_ONLY,
+        is_approved: bool = False,
     ) -> ToolOutput:
         """
-        Safely execute a registered tool by name with timeout and exception containment.
+        Safely execute a registered tool by name with permissions, approvals,
+        timeout, and exception containment.
         If the tool does not exist, returns a structured error ToolOutput.
         """
         tool = self.get(name)
@@ -73,6 +76,33 @@ class ToolRegistry:
                 success=False,
                 data=None,
                 error=f"Tool '{name}' is not registered or not recognized.",
+            )
+
+        # 1. Enforce permission level: write_action tools require WRITE_ACTION authorization
+        if (
+            tool.permission_level == ToolPermissionLevel.WRITE_ACTION
+            and authorized_permission_level != ToolPermissionLevel.WRITE_ACTION
+        ):
+            log.warning(
+                f"Permission denied for tool '{name}': requires {tool.permission_level.value}, "
+                f"authorized: {authorized_permission_level.value}"
+            )
+            return ToolOutput(
+                success=False,
+                data=None,
+                error=(
+                    f"Permission denied: Tool '{name}' requires '{tool.permission_level.value}' "
+                    f"permission level (authorized: '{authorized_permission_level.value}')."
+                ),
+            )
+
+        # 2. Enforce approval requirement
+        if tool.requires_approval and not is_approved:
+            log.warning(f"Approval required for tool '{name}': execution rejected without approval")
+            return ToolOutput(
+                success=False,
+                data=None,
+                error=f"Approval required: Tool '{name}' requires explicit authorization before execution.",
             )
 
         log.info(f"Dispatching tool '{name}' with timeout={timeout_seconds}s")
