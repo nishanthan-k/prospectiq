@@ -438,26 +438,26 @@ async def test_agent_runner_validates_inputs():
     with pytest.raises(ValueError, match="goal cannot be empty"):
         await runner.run(goal="   ")
 
-    # Invalid max_steps
-    with pytest.raises(ValueError, match="max_steps must be an integer between 1 and 20"):
-        await runner.run(goal="Valid goal", max_steps=0)
+    # Invalid max_steps (out of range, bool, non-int)
+    for bad_steps in [0, -1, 21, 25, True, False, 1.5, "5"]:
+        with pytest.raises(ValueError, match="max_steps must be an integer between 1 and 20"):
+            await runner.run(goal="Valid goal", max_steps=bad_steps)  # type: ignore[arg-type]
 
-    with pytest.raises(ValueError, match="max_steps must be an integer between 1 and 20"):
-        await runner.run(goal="Valid goal", max_steps=25)
-
-    with pytest.raises(ValueError, match="max_steps must be an integer between 1 and 20"):
-        await runner.run(goal="Valid goal", max_steps=True)  # type: ignore[arg-type]
+    # Valid integer max_steps boundaries (1, 5, 20) are accepted
+    done_resp = LLMResponse(request_id="res_valid_steps", content="Done.", finish_reason="stop")
+    for good_steps in [1, 5, 20]:
+        with patch("app.agent.runner.call_llm", new=AsyncMock(return_value=done_resp)):
+            res = await runner.run(goal="Valid goal", max_steps=good_steps)
+        assert res.is_completed is True
 
     # Unknown tool in allowed_tools
     with pytest.raises(ValueError, match="Unknown tool in allowed_tools: 'fake_tool'"):
         await runner.run(goal="Valid goal", allowed_tools=["fake_tool"])
 
     # Constructor validation
-    with pytest.raises(ValueError, match="max_steps must be an integer between 1 and 20"):
-        AgentRunner(max_steps=0)
-
-    with pytest.raises(ValueError, match="max_steps must be an integer between 1 and 20"):
-        AgentRunner(max_steps=True)  # type: ignore[arg-type]
+    for bad_steps in [0, -1, 21, True, False, 1.5, "5"]:
+        with pytest.raises(ValueError, match="max_steps must be an integer between 1 and 20"):
+            AgentRunner(max_steps=bad_steps)  # type: ignore[arg-type]
 
     with pytest.raises(ValueError, match="Unknown tool in allowed_tools"):
         AgentRunner(allowed_tools=["unknown_tool"])
@@ -710,3 +710,24 @@ async def test_agent_runner_filters_advertised_schemas_by_permission():
     app_tool_names = [t["function"]["name"] for t in (app_req.tools or [])]
     assert "approval_info" not in app_tool_names
     assert app_tool_names == ["read_info"]
+
+    # 4. Explicit allowed_tools still restricts schemas alongside permission filtering
+    class ReadExtraTool(BaseTool):
+        name = "read_extra"
+        description = "Read extra info"
+        args_schema = SimpleArgs
+        permission_level = ToolPermissionLevel.READ_ONLY
+
+        async def execute(self, q: str) -> dict[str, str]:
+            return {"q": q}
+
+    registry.register(ReadExtraTool())
+    allow_mock = AsyncMock(return_value=done_resp)
+    with patch("app.agent.runner.call_llm", new=allow_mock):
+        await ro_runner.run(
+            goal="Check allowed_tools with permission filter",
+            allowed_tools=["read_info", "write_info"],
+        )
+    allow_req = allow_mock.call_args.args[0]
+    allow_tool_names = [t["function"]["name"] for t in (allow_req.tools or [])]
+    assert allow_tool_names == ["read_info"]
