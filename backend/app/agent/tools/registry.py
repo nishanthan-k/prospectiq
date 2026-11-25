@@ -34,11 +34,14 @@ class ToolRegistry:
         self,
         permission_filter: Optional[ToolPermissionLevel] = None,
         allowed_names: Optional[list[str]] = None,
+        exclude_approval_required: bool = False,
     ) -> list[BaseTool]:
-        """List registered tools matching optional permission and allowlist filters."""
+        """List registered tools matching optional permission, approval, and allowlist filters."""
         tools = list(self._tools.values())
         if permission_filter is not None:
             tools = [t for t in tools if t.permission_level == permission_filter]
+        if exclude_approval_required:
+            tools = [t for t in tools if not t.requires_approval]
         if allowed_names is not None:
             allowed_set = set(allowed_names)
             tools = [t for t in tools if t.name in allowed_set]
@@ -48,11 +51,13 @@ class ToolRegistry:
         self,
         allowed_names: Optional[list[str]] = None,
         permission_filter: Optional[ToolPermissionLevel] = None,
+        exclude_approval_required: bool = False,
     ) -> list[dict[str, Any]]:
         """Generate OpenAI/Gemini function-calling tool schema definitions."""
         tools = self.list_tools(
             permission_filter=permission_filter,
             allowed_names=allowed_names,
+            exclude_approval_required=exclude_approval_required,
         )
         return [tool.to_openai_schema() for tool in tools]
 

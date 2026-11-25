@@ -690,3 +690,23 @@ async def test_agent_runner_filters_advertised_schemas_by_permission():
     rw_req = rw_mock.call_args.args[0]
     rw_tool_names = [t["function"]["name"] for t in (rw_req.tools or [])]
     assert set(rw_tool_names) == {"read_info", "write_info"}
+
+    # 3. Approval-required tool is also excluded from advertised schemas
+    class ApprovalTool(BaseTool):
+        name = "approval_info"
+        description = "Approval required info"
+        args_schema = SimpleArgs
+        permission_level = ToolPermissionLevel.READ_ONLY
+        requires_approval = True
+
+        async def execute(self, q: str) -> dict[str, str]:
+            return {"q": q}
+
+    registry.register(ApprovalTool())
+    app_mock = AsyncMock(return_value=done_resp)
+    with patch("app.agent.runner.call_llm", new=app_mock):
+        await ro_runner.run(goal="Check approval schema filtering")
+    app_req = app_mock.call_args.args[0]
+    app_tool_names = [t["function"]["name"] for t in (app_req.tools or [])]
+    assert "approval_info" not in app_tool_names
+    assert app_tool_names == ["read_info"]

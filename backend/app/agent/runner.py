@@ -168,6 +168,7 @@ class AgentRunner:
         openai_tools = self.registry.get_openai_tools(
             allowed_names=effective_allowed,
             permission_filter=permission_filter,
+            exclude_approval_required=True,
         )
 
         # Semaphore to bound parallel tool concurrency
