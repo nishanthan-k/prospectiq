@@ -17,6 +17,7 @@ from app.agent import (
 )
 from app.core.config import get_settings
 from app.core.logger import log
+from app.db import close_db
 from app.llm import (
     LLMRequest,
     LLMTimeoutError,
@@ -34,6 +35,7 @@ async def lifespan(app: FastAPI):
     get_gemini_client()
     yield
     await close_gemini_client()
+    await close_db()
 
 
 app = FastAPI(

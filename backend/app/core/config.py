@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     llm_max_retries: int = Field(default=3, ge=0)
     llm_retry_min_wait: float = Field(default=1.0, ge=0)
     llm_retry_max_wait: float = Field(default=10.0, ge=0)
+    database_url: str = Field(
+        default="postgresql+asyncpg://postgres:postgres@localhost:5432/prospectiq",
+        description="Async SQLAlchemy database URL (PostgreSQL asyncpg)",
+    )
+    db_echo: bool = Field(default=False, description="Enable SQLAlchemy SQL query logging")
 
     model_config = SettingsConfigDict(
         env_file=ENV_FILE,
