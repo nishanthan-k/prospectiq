@@ -319,5 +319,46 @@ async def test_stateful_runner_reuses_idempotent_tool_output_and_session_context
 
     prompt = followup_mock.call_args.args[0].messages[1]["content"]
     assert "Enterprise fintech priority" in prompt
-    assert "PRIOR CONVERSATIONAL TASKS" in prompt
+    assert "<untrusted_prior_tasks>" in prompt
     assert "Stripe enterprise payments summary." in prompt
+
+
+@pytest.mark.asyncio
+async def test_stateful_runner_session_task_mismatch_and_db_rollback_recovery(
+    db_session: AsyncSession,
+):
+    """Mismatched (session_id, task_id) raises ValueError; DB failure rolls back before mark_failed."""
+    s_repo = SessionRepository(db_session)
+    t_repo = TaskRepository(db_session)
+    s1 = await s_repo.create_session(title="Session 1")
+    s2 = await s_repo.create_session(title="Session 2")
+    task_s2 = await t_repo.create_task(s2.id, "Task on S2")
+    await db_session.commit()
+
+    runner = AgentRunner()
+    with pytest.raises(ValueError, match="does not belong to session"):
+        await runner.run(goal="Mismatch", session_id=s1.id, task_id=task_s2.id, db=db_session)
+
+    # Simulate DB error during record_step after task was committed as RUNNING
+    task_s1 = await t_repo.create_task(s1.id, "DB rollback test")
+    await db_session.commit()
+
+    turn1 = LLMResponse(request_id="r_db", content="Done", finish_reason="stop")
+    with patch("app.agent.runner.call_llm", return_value=turn1):
+        with patch.object(
+            TaskRepository,
+            "record_step",
+            side_effect=RuntimeError("Simulated DB flush error"),
+        ):
+            with pytest.raises(RuntimeError, match="Simulated DB flush error"):
+                await runner.run(
+                    goal="DB rollback test",
+                    session_id=s1.id,
+                    task_id=task_s1.id,
+                    db=db_session,
+                )
+
+    updated = await t_repo.get_task(task_s1.id)
+    assert updated is not None
+    assert updated.status == "FAILED"
+    assert "Simulated DB flush error" in (updated.error_message or "")

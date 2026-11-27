@@ -552,6 +552,12 @@ def test_agent_runner_invalid_configuration_rejected():
     with pytest.raises(ValueError, match="per_tool_timeout must be > 0"):
         AgentRunner(per_tool_timeout=-1.5)
 
+    with pytest.raises(ValueError, match="history_budget must be an integer >= 1"):
+        AgentRunner(history_budget=0)
+
+    with pytest.raises(ValueError, match="history_budget must be an integer >= 1"):
+        AgentRunner(history_budget=True)  # type: ignore[arg-type]
+
 
 @pytest.mark.asyncio
 async def test_agent_runner_permission_enforcement():
