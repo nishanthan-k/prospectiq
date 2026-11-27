@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from httpx import AsyncClient
 
-from app.llm import LLMResponse, ToolCallPayload
+from app.llm import LLMResponse, LLMTimeoutError, ToolCallPayload
 from app.research.models import SearchResult
 
 
@@ -87,3 +87,54 @@ async def test_task_observability_endpoints(client: AsyncClient):
     assert (await client.get("/api/tasks/task_missing")).status_code == 404
     assert (await client.get("/api/tasks/task_missing/steps")).status_code == 404
     assert (await client.get("/api/tasks/task_missing/tools")).status_code == 404
+
+    # 5. Soft-deleting parent session hides its tasks via /api/tasks/{id}
+    sess_id = run_data["session_id"]
+    assert (await client.delete(f"/api/sessions/{sess_id}")).status_code == 200
+    assert (await client.get(f"/api/tasks/{task_id}")).status_code == 404
+    assert (await client.get(f"/api/tasks/{task_id}/steps")).status_code == 404
+    assert (await client.get(f"/api/tasks/{task_id}/tools")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_failed_run_persists_task_and_steps_after_http_504(client: AsyncClient):
+    """When call_llm raises LLMTimeoutError (504) via FastAPI get_db, FAILED task and prior step persist."""
+    turn1 = LLMResponse(
+        request_id="r_step0",
+        content="",
+        finish_reason="tool_calls",
+        tool_calls=[
+            ToolCallPayload(
+                id="call_s0",
+                name="search_company",
+                arguments={"query": "Stripe", "max_results": 2},
+            )
+        ],
+    )
+
+    with patch(
+        "app.agent.runner.call_llm",
+        side_effect=[turn1, LLMTimeoutError("req_timeout", timeout_seconds=30.0)],
+    ):
+        with patch("app.agent.tools.definitions.search_company", new=AsyncMock(return_value=[])):
+            resp = await client.post(
+                "/api/agent/run",
+                json={"goal": "Investigate Stripe timeout persistence"},
+            )
+
+    assert resp.status_code == 504
+
+    # Session & FAILED task + step + tool execution must all be committed and inspectable
+    sessions = (await client.get("/api/sessions")).json()
+    assert len(sessions) == 1
+    detail = (await client.get(f"/api/sessions/{sessions[0]['id']}")).json()
+    assert len(detail["tasks"]) == 1
+    task_summary = detail["tasks"][0]
+    assert task_summary["status"] == "FAILED"
+
+    task_id = task_summary["id"]
+    steps = (await client.get(f"/api/tasks/{task_id}/steps")).json()
+    assert len(steps) == 1
+    tools = (await client.get(f"/api/tasks/{task_id}/tools")).json()
+    assert len(tools) == 1
+    assert tools[0]["status"] == "COMPLETED"

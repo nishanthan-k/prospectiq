@@ -121,8 +121,6 @@ class AgentInvestigateResponse(BaseModel):
     latency_ms: float
     session_id: Optional[str] = None
     task_id: Optional[str] = None
-    session_id: Optional[str] = None
-    task_id: Optional[str] = None
 
 
 class AgentQualifyRequest(BaseModel):
@@ -164,8 +162,6 @@ class AgentQualifyResponse(BaseModel):
     steps_taken: int
     total_tokens: int
     latency_ms: float
-    session_id: Optional[str] = None
-    task_id: Optional[str] = None
     session_id: Optional[str] = None
     task_id: Optional[str] = None
 

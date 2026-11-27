@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import TaskRepository, get_db
+from app.db import SessionRepository, TaskRepository, get_db
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -66,13 +66,21 @@ class ToolExecutionResponse(BaseModel):
     completed_at: Optional[datetime] = None
 
 
+async def _get_active_task_or_404(task_id: str, db: AsyncSession):
+    t_repo = TaskRepository(db)
+    task = await t_repo.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+    s_repo = SessionRepository(db)
+    if await s_repo.get_session(task.session_id, include_deleted=False) is None:
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+    return task, t_repo
+
+
 @router.get("/{task_id}", response_model=TaskResponse)
 async def get_task(task_id: str, db: AsyncSession = Depends(get_db)) -> TaskResponse:
     """Fetch task status, worker lease info, token consumption, and final answer."""
-    repo = TaskRepository(db)
-    task = await repo.get_task(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+    task, _ = await _get_active_task_or_404(task_id, db)
 
     return TaskResponse(
         id=task.id,
@@ -99,10 +107,7 @@ async def get_task_steps(
     task_id: str, db: AsyncSession = Depends(get_db)
 ) -> list[TaskStepResponse]:
     """Fetch full reasoning steps and raw message protocol payloads for a task."""
-    repo = TaskRepository(db)
-    task = await repo.get_task(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+    _, repo = await _get_active_task_or_404(task_id, db)
 
     steps = await repo.get_steps(task_id)
     return [
@@ -126,10 +131,7 @@ async def get_task_tools(
     task_id: str, db: AsyncSession = Depends(get_db)
 ) -> list[ToolExecutionResponse]:
     """Fetch granular tool execution audit logs with idempotency keys and latencies."""
-    repo = TaskRepository(db)
-    task = await repo.get_task(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+    _, repo = await _get_active_task_or_404(task_id, db)
 
     execs = await repo.get_tool_executions(task_id)
     return [

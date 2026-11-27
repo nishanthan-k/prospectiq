@@ -63,7 +63,26 @@ class TaskRepository:
         task = await self.get_task(task_id)
         if task is None:
             return None
+        if task.status in ("COMPLETED", "FAILED"):
+            raise ValueError(f"Task '{task_id}' is already in terminal state '{task.status}'")
+
         now = datetime.now(timezone.utc)
+        if (
+            task.status == "RUNNING"
+            and task.locked_by
+            and task.locked_by != locked_by
+            and task.lease_expires_at is not None
+        ):
+            lease_exp = (
+                task.lease_expires_at.replace(tzinfo=timezone.utc)
+                if task.lease_expires_at.tzinfo is None
+                else task.lease_expires_at
+            )
+            if lease_exp > now:
+                raise ValueError(
+                    f"Task '{task_id}' holds an active lease owned by '{task.locked_by}'"
+                )
+
         task.status = "RUNNING"
         task.locked_by = locked_by
         task.heartbeat_at = now
@@ -252,6 +271,22 @@ class TaskRepository:
             .where(
                 ToolExecution.idempotency_key == idempotency_key,
                 ToolExecution.status == "COMPLETED",
+            )
+            .order_by(ToolExecution.created_at.desc())
+            .limit(1)
+        )
+        return (await self.db.execute(stmt)).scalar_one_or_none()
+
+    async def find_unknown_non_idempotent_by_key(
+        self, idempotency_key: str
+    ) -> Optional[ToolExecution]:
+        """Look up a prior UNKNOWN non-idempotent ToolExecution matching an idempotency key."""
+        stmt = (
+            select(ToolExecution)
+            .where(
+                ToolExecution.idempotency_key == idempotency_key,
+                ToolExecution.status == "UNKNOWN",
+                ToolExecution.is_idempotent.is_(False),
             )
             .order_by(ToolExecution.created_at.desc())
             .limit(1)

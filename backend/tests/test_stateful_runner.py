@@ -2,6 +2,7 @@ import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.runner import AgentRunner
@@ -10,7 +11,7 @@ from app.llm import LLMResponse, ToolCallPayload
 from app.research.models import ExtractedPage
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def db_session():
     """Provide an isolated in-memory async SQLite session for stateful runner tests."""
     engine = create_db_engine("sqlite+aiosqlite:///:memory:")
@@ -179,7 +180,7 @@ async def test_stateful_runner_multi_turn_session_injects_prior_memories(db_sess
     assert res2.is_completed is True
     sent_req = followup_mock.call_args.args[0]
     user_prompt = sent_req.messages[1]["content"]
-    assert "PRIOR SESSION CONTEXT" in user_prompt
+    assert "<untrusted_session_memory>" in user_prompt
     assert "https://retool.com" in user_prompt
     assert "Build internal applications, dashboards, and workflows fast." in user_prompt
 
@@ -224,3 +225,99 @@ async def test_stateful_runner_unknown_tool_crash_and_missing_session(db_session
     assert len(execs) == 1
     assert execs[0].status == "UNKNOWN"
     assert json.loads(json.dumps(execs[0].input_arguments)) == {"query": "Stripe"}
+
+
+@pytest.mark.asyncio
+async def test_stateful_runner_parallel_partial_crash_persists_sibling_result(
+    db_session: AsyncSession,
+):
+    """If one parallel tool crashes and another succeeds, both ToolExecutions record exact statuses."""
+    runner = AgentRunner()
+
+    turn1 = LLMResponse(
+        request_id="r_partial",
+        content="",
+        finish_reason="tool_calls",
+        tool_calls=[
+            ToolCallPayload(id="c_crash", name="search_company", arguments={"query": "crash"}),
+            ToolCallPayload(id="c_ok", name="search_company", arguments={"query": "ok"}),
+        ],
+    )
+
+    async def partial_execute(name: str, args: dict, **kwargs):
+        if args.get("query") == "crash":
+            raise RuntimeError("Boom on c_crash")
+        from app.agent.tools.base import ToolOutput
+
+        return ToolOutput(success=True, data=[{"title": "OK"}], error=None)
+
+    with patch("app.agent.runner.call_llm", return_value=turn1):
+        with patch.object(runner.registry, "execute_tool", side_effect=partial_execute):
+            with pytest.raises(RuntimeError, match="Boom on c_crash"):
+                await runner.run(goal="Partial crash test", db=db_session)
+
+    s_repo = SessionRepository(db_session)
+    t_repo = TaskRepository(db_session)
+    sessions = await s_repo.list_sessions()
+    tasks = await t_repo.list_tasks_for_session(sessions[0].id)
+    assert tasks[0].status == "FAILED"
+
+    execs = await t_repo.get_tool_executions(tasks[0].id)
+    statuses = {e.tool_call_id: e.status for e in execs}
+    assert statuses == {"c_crash": "UNKNOWN", "c_ok": "COMPLETED"}
+
+
+@pytest.mark.asyncio
+async def test_stateful_runner_reuses_idempotent_tool_output_and_session_context(
+    db_session: AsyncSession,
+):
+    """Duplicate idempotent tool+args in the same task reuses cached output; follow-ups inherit session context."""
+    s_repo = SessionRepository(db_session)
+    sess = await s_repo.create_session(
+        title="Context & Idempotency",
+        company_name="Stripe",
+        domain="stripe.com",
+        context={"notes": "Enterprise fintech priority"},
+    )
+    runner = AgentRunner()
+
+    turn1 = LLMResponse(
+        request_id="r_idem_1",
+        content="",
+        finish_reason="tool_calls",
+        tool_calls=[ToolCallPayload(id="c1", name="search_company", arguments={"query": "Stripe"})],
+    )
+    turn2 = LLMResponse(
+        request_id="r_idem_2",
+        content="",
+        finish_reason="tool_calls",
+        tool_calls=[ToolCallPayload(id="c2", name="search_company", arguments={"query": "Stripe"})],
+    )
+    turn3 = LLMResponse(
+        request_id="r_idem_3",
+        content="Stripe enterprise payments summary.",
+        finish_reason="stop",
+    )
+
+    search_mock = AsyncMock(return_value=[])
+    with patch("app.agent.runner.call_llm", side_effect=[turn1, turn2, turn3]):
+        with patch("app.agent.tools.definitions.search_company", new=search_mock):
+            res1 = await runner.run(goal="First search", session_id=sess.id, db=db_session)
+
+    # Underlying search_company called only ONCE despite two identical tool invocations
+    assert search_mock.await_count == 1
+    assert res1.is_completed is True
+
+    # Follow-up run inherits sess.context and prior completed Task summary
+    followup_mock = AsyncMock(
+        return_value=LLMResponse(
+            request_id="r_follow", content="Follow-up done.", finish_reason="stop"
+        )
+    )
+    with patch("app.agent.runner.call_llm", new=followup_mock):
+        await runner.run(goal="Follow up", session_id=sess.id, db=db_session)
+
+    prompt = followup_mock.call_args.args[0].messages[1]["content"]
+    assert "Enterprise fintech priority" in prompt
+    assert "PRIOR CONVERSATIONAL TASKS" in prompt
+    assert "Stripe enterprise payments summary." in prompt

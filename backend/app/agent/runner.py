@@ -83,6 +83,12 @@ async def _persist_run_memories(
         )
 
 
+async def _commit_checkpoint(db: Optional[AsyncSession]) -> None:
+    """Commit the current DB checkpoint when stateful persistence is active."""
+    if db is not None:
+        await db.commit()
+
+
 class AgentRunner:
     """
     Autonomous multi-turn agent execution loop with deterministic tool calling,
@@ -175,7 +181,7 @@ class AgentRunner:
         """
         Execute the autonomous agent loop until the objective is satisfied
         or the max_steps ceiling is reached. When `db` is provided, checkpoints
-        TaskSteps, ToolExecutions, and SessionMemories to the database.
+        TaskSteps, ToolExecutions, and SessionMemories at durable boundaries.
         """
         # 1. Internal validation of inputs
         if not goal or not goal.strip():
@@ -203,12 +209,13 @@ class AgentRunner:
         req_id = request_id or f"agt_{int(start_time * 1000)}"
         effective_worker_id = worker_id or f"worker-{os.getpid()}"
 
-        # 2. Optional Stateful DB Setup (Session, Memory, Task & Lease)
+        # 2. Optional Stateful DB Setup (Session, Memory, Prior Tasks, Task & Lease)
         session_repo: Optional[SessionRepository] = None
         task_repo: Optional[TaskRepository] = None
         active_session_id: Optional[str] = session_id
         active_task_id: Optional[str] = task_id
         prior_memory_block = ""
+        prior_task_block = ""
 
         if db is not None:
             session_repo = SessionRepository(db)
@@ -224,6 +231,20 @@ class AgentRunner:
                     company_name = sess.company_name
                 if not domain and sess.domain:
                     domain = sess.domain
+                if not context and sess.context:
+                    notes = sess.context.get("notes")
+                    context = str(notes) if notes else json.dumps(sess.context)
+
+                prior_tasks = await task_repo.list_tasks_for_session(active_session_id)
+                completed_prior = [
+                    t for t in prior_tasks if t.status == "COMPLETED" and t.final_answer
+                ][-3:]
+                if completed_prior:
+                    task_lines = ["[PRIOR CONVERSATIONAL TASKS]"]
+                    for pt in completed_prior:
+                        ans_preview = (pt.final_answer or "")[:300].strip()
+                        task_lines.append(f"- Goal: {pt.goal}\n  Result: {ans_preview}")
+                    prior_task_block = "\n".join(task_lines)
             else:
                 sess_title = f"Research {company_name}" if company_name else goal.strip()[:80]
                 sess = await session_repo.create_session(
@@ -248,6 +269,7 @@ class AgentRunner:
                 active_task_id = created_task.id
 
             await task_repo.mark_running(active_task_id, locked_by=effective_worker_id)
+            await _commit_checkpoint(db)
 
         log.info(
             f"[{req_id}] Starting agent run: goal='{goal[:80]}...', "
@@ -263,6 +285,8 @@ class AgentRunner:
             initial_user_prompt += f"\nTarget Domain: {domain}"
         if context:
             initial_user_prompt += f"\nExisting Notes / Context:\n{context}"
+        if prior_task_block:
+            initial_user_prompt += f"\n\n{prior_task_block}"
         if prior_memory_block:
             initial_user_prompt += f"\n\n{prior_memory_block}"
 
@@ -323,6 +347,7 @@ class AgentRunner:
                     )
                     step_row_id = step_row.id
                     await task_repo.refresh_heartbeat(active_task_id, locked_by=effective_worker_id)
+                    await _commit_checkpoint(db)
 
                 # Case A: Model emitted final answer (no tool calls)
                 if not resp.tool_calls:
@@ -352,6 +377,7 @@ class AgentRunner:
                                 total_tokens=total_tokens,
                                 latency_ms=latency_ms,
                             )
+                            await _commit_checkpoint(db)
                         return AgentRunResult(
                             final_answer=empty_msg,
                             steps_taken=step + 1,
@@ -384,6 +410,7 @@ class AgentRunner:
                             total_tokens=total_tokens,
                             latency_ms=latency_ms,
                         )
+                        await _commit_checkpoint(db)
                     return AgentRunResult(
                         final_answer=clean_content,
                         steps_taken=step + 1,
@@ -411,22 +438,54 @@ class AgentRunner:
                         f"Identical tool call repeated. Injecting breaker directive."
                     )
 
-                # Pre-insert RUNNING ToolExecution rows sequentially before parallel gather
+                # Idempotency check + pre-insert RUNNING ToolExecution rows before parallel gather
                 exec_rows: dict[int, ToolExecution] = {}
+                cached_outputs: dict[int, ToolOutput] = {}
                 if task_repo is not None and active_task_id is not None:
                     for idx, tc in enumerate(resp.tool_calls):
-                        if idx < self.max_tool_calls_per_turn and not tc.parse_error:
-                            tool_obj = self.registry.get(tc.name)
-                            perm = tool_obj.permission_level.value if tool_obj else "read_only"
-                            exec_rows[idx] = await task_repo.start_tool_execution(
-                                task_id=active_task_id,
-                                step_id=step_row_id,
-                                tool_name=tc.name,
-                                tool_call_id=tc.id,
-                                input_arguments=tc.arguments,
-                                is_idempotent=(perm == "read_only"),
-                                permission_level=perm,
-                            )
+                        if idx >= self.max_tool_calls_per_turn or tc.parse_error:
+                            continue
+
+                        tool_obj = self.registry.get(tc.name)
+                        perm = tool_obj.permission_level.value if tool_obj else "read_only"
+                        is_idem = perm == "read_only"
+                        idem_key = TaskRepository.compute_idempotency_key(
+                            active_task_id, tc.name, tc.arguments
+                        )
+
+                        if is_idem:
+                            cached = await task_repo.find_completed_by_idempotency_key(idem_key)
+                            if cached is not None:
+                                log.info(
+                                    f"[{req_id}] Reusing cached idempotent output for '{tc.name}' ({cached.id})"
+                                )
+                                cached_outputs[idx] = ToolOutput(
+                                    success=True, data=cached.output_payload, error=None
+                                )
+                                continue
+                        else:
+                            prior_unk = await task_repo.find_unknown_non_idempotent_by_key(idem_key)
+                            if prior_unk is not None:
+                                cached_outputs[idx] = ToolOutput(
+                                    success=False,
+                                    data=None,
+                                    error=(
+                                        f"Idempotency guard: non-idempotent tool '{tc.name}' "
+                                        f"has a prior UNKNOWN execution ({prior_unk.id})."
+                                    ),
+                                )
+                                continue
+
+                        exec_rows[idx] = await task_repo.start_tool_execution(
+                            task_id=active_task_id,
+                            step_id=step_row_id,
+                            tool_name=tc.name,
+                            tool_call_id=tc.id,
+                            input_arguments=tc.arguments,
+                            is_idempotent=is_idem,
+                            permission_level=perm,
+                        )
+                    await _commit_checkpoint(db)
 
                 async def _exec_single(
                     idx: int,
@@ -470,6 +529,9 @@ class AgentRunner:
                             0.0,
                         )
 
+                    if idx in cached_outputs:
+                        return idx, tc, cached_outputs[idx], None, 0.0
+
                     t0 = time.perf_counter()
                     try:
                         async with semaphore:
@@ -489,10 +551,15 @@ class AgentRunner:
                     *[_exec_single(idx, tc) for idx, tc in enumerate(resp.tool_calls)]
                 )
 
+                # Process ALL tool results before raising any unhandled crash_exc
                 turn_tool_messages: list[dict[str, Any]] = []
+                first_crash: Optional[BaseException] = None
+
                 for idx, tc, out, crash_exc, dur_ms in tool_results:
                     exec_row = exec_rows.get(idx)
                     if crash_exc is not None:
+                        if first_crash is None:
+                            first_crash = crash_exc
                         if task_repo is not None and exec_row is not None:
                             await task_repo.fail_tool_execution(
                                 exec_row.id,
@@ -500,7 +567,29 @@ class AgentRunner:
                                 latency_ms=dur_ms,
                                 status="UNKNOWN",
                             )
-                        raise crash_exc
+                        err_payload: dict[str, Any] = {
+                            "error": f"Tool '{tc.name}' crashed unexpectedly."
+                        }
+                        tool_msg = {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "name": tc.name,
+                            "content": json.dumps(err_payload),
+                        }
+                        messages.append(tool_msg)
+                        turn_tool_messages.append(tool_msg)
+                        tool_call_trace.append(
+                            ToolCallRecord(
+                                step=step,
+                                tool_name=tc.name,
+                                tool_call_id=tc.id,
+                                arguments=tc.arguments,
+                                output=err_payload,
+                                is_error=True,
+                                latency_ms=dur_ms,
+                            )
+                        )
+                        continue
 
                     assert out is not None
                     is_err = not out.success
@@ -555,6 +644,10 @@ class AgentRunner:
 
                 if task_repo is not None and step_row_id is not None:
                     await task_repo.update_step_tool_messages(step_row_id, turn_tool_messages)
+                    await _commit_checkpoint(db)
+
+                if first_crash is not None:
+                    raise first_crash
 
             # 5. Forced Final Synthesis Turn if max_steps reached without final text
             log.warning(
@@ -619,6 +712,7 @@ class AgentRunner:
                     total_tokens=total_tokens,
                     latency_ms=latency_ms,
                 )
+                await _commit_checkpoint(db)
 
             return AgentRunResult(
                 final_answer=clean_synth,
@@ -630,7 +724,7 @@ class AgentRunner:
                 session_id=active_session_id,
                 task_id=active_task_id,
             )
-        except Exception as exc:
+        except BaseException as exc:
             if task_repo is not None and active_task_id is not None:
                 latency_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
                 await task_repo.mark_failed(
@@ -640,4 +734,5 @@ class AgentRunner:
                     total_tokens=total_tokens,
                     latency_ms=latency_ms,
                 )
+                await _commit_checkpoint(db)
             raise
