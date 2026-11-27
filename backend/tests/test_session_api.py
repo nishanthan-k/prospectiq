@@ -119,3 +119,11 @@ async def test_run_agent_in_session_persists_memories(client: AsyncClient):
             "/api/agent/run", json={"goal": "Investigate", "session_id": "sess_missing"}
         )
     ).status_code == 404
+
+    # Invalid allowed_tools in session-scoped agent run returns 400 (not 500)
+    bad_tool_resp = await client.post(
+        f"/api/sessions/{sess_id}/agent/run",
+        json={"goal": "Investigate", "allowed_tools": ["nonexistent_tool"]},
+    )
+    assert bad_tool_resp.status_code == 400
+    assert "nonexistent_tool" in bad_tool_resp.json()["detail"]

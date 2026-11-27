@@ -220,4 +220,9 @@ async def run_agent_in_session(
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
 
     scoped_request = request.model_copy(update={"session_id": session_id})
-    return await run_sales_agent(scoped_request, db=db)
+    try:
+        return await run_sales_agent(scoped_request, db=db)
+    except ValueError as exc:
+        if "not found" in str(exc).lower():
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
