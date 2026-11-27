@@ -22,10 +22,12 @@ class SessionRepository:
         metadata: Optional[dict[str, Any]] = None,
     ) -> Session:
         """Create and persist a new research session."""
+        clean_company = company_name.strip() or None if company_name else None
+        clean_domain = domain.strip() or None if domain else None
         sess = Session(
             title=title.strip(),
-            company_name=company_name.strip() if company_name else None,
-            domain=domain.strip() if domain else None,
+            company_name=clean_company,
+            domain=clean_domain,
             context=context or {},
             metadata_=metadata or {},
         )
@@ -92,6 +94,9 @@ class SessionRepository:
         obs_time = extracted_at or now
 
         if existing is not None:
+            # Protect verified primary-domain facts from unverified overwrites
+            if existing.is_verified and not is_verified:
+                return existing
             if confidence >= existing.confidence or (is_verified and not existing.is_verified):
                 existing.value = value
                 existing.source_url = source_url

@@ -1,4 +1,5 @@
 import pytest
+import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -15,7 +16,7 @@ from app.db import (
 )
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def db_session():
     """Provide an isolated in-memory async SQLite session with all Level 4 tables."""
     engine = create_db_engine("sqlite+aiosqlite:///:memory:")
@@ -93,7 +94,20 @@ async def test_session_memory_upsert_provenance_and_confidence(db_session: Async
     assert mem_lower.value == {"summary": "Online payments API"}
     assert mem_lower.confidence == 0.80
 
-    # Higher confidence update overwrites cleanly
+    # Unverified observation with equal/higher confidence does NOT overwrite verified fact
+    mem_unverified = await repo.upsert_memory(
+        session_id=sess.id,
+        memory_type="fact",
+        key="company.offerings",
+        value={"summary": "Unverified equal-confidence guess"},
+        source_url="https://blog.example.com",
+        confidence=0.80,
+        is_verified=False,
+    )
+    assert mem_unverified.value == {"summary": "Online payments API"}
+    assert mem_unverified.is_verified is True
+
+    # Higher confidence verified update overwrites cleanly
     mem_higher = await repo.upsert_memory(
         session_id=sess.id,
         memory_type="fact",
@@ -249,3 +263,29 @@ async def test_session_cascade_delete_removes_children(db_session: AsyncSession)
     assert (await db_session.execute(select(Task))).scalars().all() == []
     assert (await db_session.execute(select(TaskStep))).scalars().all() == []
     assert (await db_session.execute(select(ToolExecution))).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_session_normalizes_blank_fields_and_task_lease_guards(db_session: AsyncSession):
+    """Whitespace-only company_name/domain normalize to None; mark_running enforces lease/terminal guards."""
+    s_repo = SessionRepository(db_session)
+    t_repo = TaskRepository(db_session)
+
+    sess = await s_repo.create_session(title="  Clean Test  ", company_name="   ", domain="  ")
+    assert sess.title == "Clean Test"
+    assert sess.company_name is None
+    assert sess.domain is None
+
+    task = await t_repo.create_task(sess.id, "Lease guard test")
+    await t_repo.mark_running(task.id, locked_by="worker-1", lease_seconds=60)
+
+    # Another worker cannot steal an active unexpired lease
+    with pytest.raises(ValueError, match="holds an active lease"):
+        await t_repo.mark_running(task.id, locked_by="worker-2", lease_seconds=60)
+
+    # Completed task cannot be restarted via mark_running
+    await t_repo.mark_completed(
+        task.id, final_answer="Done", steps_taken=1, total_tokens=10, latency_ms=5.0
+    )
+    with pytest.raises(ValueError, match="already in terminal state"):
+        await t_repo.mark_running(task.id, locked_by="worker-1", lease_seconds=60)

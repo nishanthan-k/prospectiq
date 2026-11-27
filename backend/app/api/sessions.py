@@ -32,6 +32,14 @@ class SessionCreateRequest(BaseModel):
             raise ValueError("Title cannot be empty or only whitespace")
         return v.strip()
 
+    @field_validator("company_name", "domain")
+    @classmethod
+    def normalize_optional_strings(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        cleaned = v.strip()
+        return cleaned if cleaned else None
+
 
 class SessionMemoryResponse(BaseModel):
     """Grounded working memory record with source provenance."""

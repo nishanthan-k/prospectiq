@@ -19,6 +19,7 @@ from app.agent.runner import AgentRunner
 from app.agent.tools.definitions import DEFAULT_PLATFORM_ICP_CRITERIA
 from app.core.json_utils import _safe_parse_json
 from app.core.logger import log
+from app.db.repositories import SessionRepository
 from app.research.evidence import _verify_and_clean_citations
 from app.research.models import EvidenceCitation
 from app.research.ranker import RankedChunk
@@ -387,6 +388,20 @@ async def qualify_company(
     if not verdict:
         verdict = _evaluate_text_against_icp(result.final_answer)
 
+    if db is not None and result.session_id is not None and verdict is not None:
+        s_repo = SessionRepository(db)
+        await s_repo.upsert_memory(
+            session_id=result.session_id,
+            memory_type="qualification",
+            key="qualification.latest",
+            value=verdict.model_dump(),
+            source_url=None,
+            source_quote=None,
+            confidence=0.80,
+            is_verified=False,
+        )
+        await db.commit()
+
     total_latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
     return AgentQualifyResponse(
@@ -447,6 +462,20 @@ async def run_sales_agent(
     qualification = _extract_qualification_verdict(
         result.final_answer, result.tool_calls, company_name=request.company_name
     )
+    if db is not None and result.session_id is not None and qualification is not None:
+        s_repo = SessionRepository(db)
+        await s_repo.upsert_memory(
+            session_id=result.session_id,
+            memory_type="qualification",
+            key="qualification.latest",
+            value=qualification.model_dump(),
+            source_url=None,
+            source_quote=None,
+            confidence=0.80,
+            is_verified=False,
+        )
+        await db.commit()
+
     total_latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
     log.bind(

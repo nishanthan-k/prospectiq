@@ -2,7 +2,18 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -151,7 +162,12 @@ class SessionMemory(Base):
 
     __tablename__ = "session_memories"
     __table_args__ = (
-        Index("ix_session_memories_session_type_key", "session_id", "memory_type", "key"),
+        UniqueConstraint(
+            "session_id",
+            "memory_type",
+            "key",
+            name="uq_session_memories_session_type_key",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: _new_id("mem"))
