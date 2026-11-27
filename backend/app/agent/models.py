@@ -34,6 +34,12 @@ class AgentRunResult(BaseModel):
         default=0, ge=0, description="Cumulative tokens consumed across all turns"
     )
     latency_ms: float = Field(default=0.0, description="Total execution duration in milliseconds")
+    session_id: Optional[str] = Field(
+        default=None, description="Persistent session ID when executed with DB persistence"
+    )
+    task_id: Optional[str] = Field(
+        default=None, description="Persistent task ID when executed with DB persistence"
+    )
 
 
 class QualificationVerdict(BaseModel):
