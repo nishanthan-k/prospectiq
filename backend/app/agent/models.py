@@ -82,6 +82,9 @@ class AgentInvestigateRequest(BaseModel):
     max_steps: StrictInt = Field(
         default=4, ge=1, le=10, description="Maximum agent execution turns (1 to 10)"
     )
+    session_id: Optional[str] = Field(
+        default=None, description="Optional persistent session ID for stateful memory"
+    )
 
     @field_validator("company_name")
     @classmethod
@@ -116,6 +119,10 @@ class AgentInvestigateResponse(BaseModel):
     steps_taken: int
     total_tokens: int
     latency_ms: float
+    session_id: Optional[str] = None
+    task_id: Optional[str] = None
+    session_id: Optional[str] = None
+    task_id: Optional[str] = None
 
 
 class AgentQualifyRequest(BaseModel):
@@ -128,6 +135,9 @@ class AgentQualifyRequest(BaseModel):
     context: Optional[str] = Field(default=None, description="Optional CRM context or notes")
     max_steps: StrictInt = Field(
         default=4, ge=1, le=10, description="Maximum agent execution turns (1 to 10)"
+    )
+    session_id: Optional[str] = Field(
+        default=None, description="Optional persistent session ID for stateful memory"
     )
 
     @field_validator("company_name")
@@ -154,6 +164,10 @@ class AgentQualifyResponse(BaseModel):
     steps_taken: int
     total_tokens: int
     latency_ms: float
+    session_id: Optional[str] = None
+    task_id: Optional[str] = None
+    session_id: Optional[str] = None
+    task_id: Optional[str] = None
 
 
 class AgentRunRequest(BaseModel):
@@ -176,6 +190,9 @@ class AgentRunRequest(BaseModel):
     )
     allowed_tools: Optional[list[str]] = Field(
         default=None, description="Optional allowlist of tool names"
+    )
+    session_id: Optional[str] = Field(
+        default=None, description="Optional persistent session ID for stateful memory"
     )
 
     @model_validator(mode="after")
@@ -213,3 +230,5 @@ class AgentRunResponse(BaseModel):
     )
     total_tokens: int
     latency_ms: float
+    session_id: Optional[str] = None
+    task_id: Optional[str] = None

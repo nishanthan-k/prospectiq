@@ -1,8 +1,9 @@
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent import (
     AgentInvestigateRequest,
@@ -15,9 +16,10 @@ from app.agent import (
     qualify_company,
     run_sales_agent,
 )
+from app.api import sessions_router, tasks_router
 from app.core.config import get_settings
 from app.core.logger import log
-from app.db import close_db
+from app.db import close_db, get_db
 from app.llm import (
     LLMRequest,
     LLMTimeoutError,
@@ -52,6 +54,8 @@ async def llm_timeout_handler(_request: Request, exc: LLMTimeoutError) -> JSONRe
 
 
 api_router = APIRouter(prefix="/api")
+api_router.include_router(sessions_router)
+api_router.include_router(tasks_router)
 
 
 @app.get("/health")
@@ -70,18 +74,33 @@ async def research(request: ResearchRequest):
 
 
 @api_router.post("/agent/investigate", response_model=AgentInvestigateResponse)
-async def agent_investigate(request: AgentInvestigateRequest):
-    return await investigate_company(request)
+async def agent_investigate(request: AgentInvestigateRequest, db: AsyncSession = Depends(get_db)):
+    try:
+        return await investigate_company(request, db=db)
+    except ValueError as exc:
+        if "not found" in str(exc).lower():
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @api_router.post("/agent/qualify", response_model=AgentQualifyResponse)
-async def agent_qualify(request: AgentQualifyRequest):
-    return await qualify_company(request)
+async def agent_qualify(request: AgentQualifyRequest, db: AsyncSession = Depends(get_db)):
+    try:
+        return await qualify_company(request, db=db)
+    except ValueError as exc:
+        if "not found" in str(exc).lower():
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @api_router.post("/agent/run", response_model=AgentRunResponse)
-async def agent_run(request: AgentRunRequest):
-    return await run_sales_agent(request)
+async def agent_run(request: AgentRunRequest, db: AsyncSession = Depends(get_db)):
+    try:
+        return await run_sales_agent(request, db=db)
+    except ValueError as exc:
+        if "not found" in str(exc).lower():
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 app.include_router(api_router)

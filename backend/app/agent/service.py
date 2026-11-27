@@ -3,6 +3,8 @@ import time
 import uuid
 from typing import Any, Optional
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.agent.models import (
     AgentInvestigateRequest,
     AgentInvestigateResponse,
@@ -292,7 +294,9 @@ def _extract_investigate_profile(final_answer: str, company_name: str) -> dict[s
     }
 
 
-async def investigate_company(request: AgentInvestigateRequest) -> AgentInvestigateResponse:
+async def investigate_company(
+    request: AgentInvestigateRequest, db: Optional[AsyncSession] = None
+) -> AgentInvestigateResponse:
     """
     Dedicated endpoint service for investigating target company offerings, business model,
     and target audience using search and page retrieval tools.
@@ -317,6 +321,8 @@ async def investigate_company(request: AgentInvestigateRequest) -> AgentInvestig
         domain=request.domain,
         context=request.context,
         request_id=request_id,
+        db=db,
+        session_id=request.session_id,
     )
 
     citations = _extract_citations(result.final_answer, result.tool_calls)
@@ -336,10 +342,14 @@ async def investigate_company(request: AgentInvestigateRequest) -> AgentInvestig
         steps_taken=result.steps_taken,
         total_tokens=result.total_tokens,
         latency_ms=total_latency_ms,
+        session_id=result.session_id,
+        task_id=result.task_id,
     )
 
 
-async def qualify_company(request: AgentQualifyRequest) -> AgentQualifyResponse:
+async def qualify_company(
+    request: AgentQualifyRequest, db: Optional[AsyncSession] = None
+) -> AgentQualifyResponse:
     """
     Dedicated endpoint service for qualifying a target company against our platform ICP.
     Investigates offerings and executes qualification evaluation.
@@ -366,6 +376,8 @@ async def qualify_company(request: AgentQualifyRequest) -> AgentQualifyResponse:
         domain=request.domain,
         context=request.context,
         request_id=request_id,
+        db=db,
+        session_id=request.session_id,
     )
 
     citations = _extract_citations(result.final_answer, result.tool_calls)
@@ -387,10 +399,14 @@ async def qualify_company(request: AgentQualifyRequest) -> AgentQualifyResponse:
         steps_taken=result.steps_taken,
         total_tokens=result.total_tokens,
         latency_ms=total_latency_ms,
+        session_id=result.session_id,
+        task_id=result.task_id,
     )
 
 
-async def run_sales_agent(request: AgentRunRequest) -> AgentRunResponse:
+async def run_sales_agent(
+    request: AgentRunRequest, db: Optional[AsyncSession] = None
+) -> AgentRunResponse:
     """
     Unified autonomous sales agent execution (Investigate + Qualify = Run).
     Supports open-ended goals as well as automated qualification.
@@ -423,6 +439,8 @@ async def run_sales_agent(request: AgentRunRequest) -> AgentRunResponse:
         domain=request.domain,
         context=request.context,
         request_id=request_id,
+        db=db,
+        session_id=request.session_id,
     )
 
     citations = _extract_citations(result.final_answer, result.tool_calls)
@@ -452,4 +470,6 @@ async def run_sales_agent(request: AgentRunRequest) -> AgentRunResponse:
         qualification=qualification,
         total_tokens=result.total_tokens,
         latency_ms=total_latency_ms,
+        session_id=result.session_id,
+        task_id=result.task_id,
     )
